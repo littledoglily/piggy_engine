@@ -42,8 +42,12 @@ public:
     std::vector<DocId> readPostingListFrom(const std::string& term,
                                            DocId target_doc_id) const;
 
+    // 从 .pos 读取某 term 所有文档的 <doc_id, tf, positions>
+    std::vector<PostingEntry> readPosEntries(const std::string& term) const;
+
     // 从 .fdt 按 doc_id 读取原文（返回 StoredDoc）
     struct StoredDocResult {
+        DocId       doc_id = 0;
         std::string title;
         std::string body;
         std::string category;

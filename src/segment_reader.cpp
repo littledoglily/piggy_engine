@@ -157,7 +157,7 @@ const TermMeta* SegmentReader::getTermMeta(const std::string& term) const {
 // ─────────────────────────────────────────────────────────────────────────────
 
 SkipList SegmentReader::readSkipList(const TermMeta& meta) const {
-    // SkipList 紧接在 skip_offset 处
+    doc_file_.clear();
     doc_file_.seekg(static_cast<std::streamoff>(meta.skip_offset));
 
     // 读 4B level0_count + 4B level1_count，计算总字节数
@@ -178,12 +178,12 @@ SkipList SegmentReader::readSkipList(const TermMeta& meta) const {
 // ─────────────────────────────────────────────────────────────────────────────
 // readPostingList：全量解压某 term 的 posting list
 // ─────────────────────────────────────────────────────────────────────────────
-
+// Todo: 当前postinglist 是全加载到内存，当postinglist过大时，可能会有性能问题，可以考虑分块加载和解压
 std::vector<DocId> SegmentReader::readPostingList(const std::string& term) const {
     const TermMeta* meta = getTermMeta(term);
     if (!meta) return {};
 
-    // 直接 seek 到 posting 数据区，读全部 Block
+    doc_file_.clear();
     doc_file_.seekg(static_cast<std::streamoff>(meta->posting_offset));
 
     // 估计总字节数：读到文件末尾或下一个 term 的 skip_offset
@@ -273,6 +273,36 @@ std::vector<DocId> SegmentReader::readPostingListFrom(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// readPosEntries：从 .pos 读取某 term 的全部 <doc_id, tf, positions>
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::vector<PostingEntry> SegmentReader::readPosEntries(const std::string& term) const {
+    const TermMeta* meta = getTermMeta(term);
+    if (!meta) return {};
+
+    pos_file_.clear();  // seekg 不会自动清除 eofbit，必须先 clear 再检查
+    pos_file_.seekg(static_cast<std::streamoff>(meta->pos_offset));
+    if (!pos_file_) return {};
+
+    std::vector<PostingEntry> result;
+    result.reserve(meta->doc_freq);
+
+    for (uint32_t i = 0; i < meta->doc_freq; ++i) {
+        PostingEntry entry;
+        pos_file_.read(reinterpret_cast<char*>(&entry.doc_id), 4);
+        pos_file_.read(reinterpret_cast<char*>(&entry.tf), 4);
+        if (!pos_file_) break;
+
+        entry.positions.resize(entry.tf);
+        for (uint32_t j = 0; j < entry.tf; ++j)
+            pos_file_.read(reinterpret_cast<char*>(&entry.positions[j]), 4);
+
+        result.push_back(std::move(entry));
+    }
+    return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // readStoredDoc：从 .fdt 读取文档原文
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -285,6 +315,7 @@ SegmentReader::StoredDocResult SegmentReader::readStoredDoc(DocId doc_id) const 
 
     uint32_t did = 0;
     fdt_file_.read(reinterpret_cast<char*>(&did), 4);
+    r.doc_id = did;
 
     auto readStr = [&]() -> std::string {
         uint32_t len = 0;

@@ -312,6 +312,99 @@ void test_soft_delete_and_merge() {
     PASS();
 }
 
+void test_merge_tf_and_positions() {
+    TEST(merge_tf_and_positions);
+    const std::string dir = "/tmp/ii_tf_pos_test";
+    std::filesystem::remove_all(dir);
+
+    // Segment 0: doc1 含 "python" 3 次，doc2 含 "python" 1 次
+    // Segment 1: doc3 含 "python" 2 次
+    // merge 后验证 tf 和 positions 均被正确保留
+    {
+        ii::IndexWriter writer(dir, 100.0f);
+
+        ii::Document d1;
+        d1.doc_id   = 1;
+        d1.title    = "Multi Python";
+        d1.body     = "python python python";
+        d1.category = "test";
+        writer.addDocument(d1);
+
+        ii::Document d2;
+        d2.doc_id   = 2;
+        d2.title    = "Single Python";
+        d2.body     = "python tutorial";
+        d2.category = "test";
+        writer.addDocument(d2);
+
+        writer.flush();  // → segment 0
+
+        ii::Document d3;
+        d3.doc_id   = 3;
+        d3.title    = "Double Python";
+        d3.body     = "python python guide";
+        d3.category = "test";
+        writer.addDocument(d3);
+
+        writer.commit();  // → segment 1
+    }
+
+    // 合并两个 segment
+    uint32_t merged_seg_id = 0;
+    {
+        ii::SegmentMerger merger(dir);
+        auto ids = merger.activeSegmentIds();
+        if (ids.size() < 2) FAIL("expected 2 segments before merge");
+        auto stats = merger.mergeAll(99);
+        merged_seg_id = stats.output_segment_id;
+        if (stats.output_doc_count != 3) FAIL("expected 3 docs after merge");
+    }
+
+    // 用 SegmentReader 直接验证 .pos 文件内容
+    {
+        ii::SegmentReader reader(dir, merged_seg_id);
+
+        // 找到 "python" 的 pos entries
+        // 分词后 "python" 不会被词干化，直接查
+        auto entries = reader.readPosEntries("python");
+        if (entries.size() != 3) FAIL("expected 3 docs with python, got " + std::to_string(entries.size()));
+
+        // 按 doc_id 排序（merge 后 doc_id 从 1 重新编号）
+        std::sort(entries.begin(), entries.end(),
+                  [](const ii::PostingEntry& a, const ii::PostingEntry& b) {
+                      return a.doc_id < b.doc_id;
+                  });
+
+        // analyzer 拼接 title+body 分析：
+        //   doc1: "Multi Python python python python" → python 出现 4 次 (positions 1,2,3,4)
+        //   doc2: "Single Python python tutorial"    → python 出现 2 次 (positions 1,2)
+        //   doc3: "Double Python python python guide"→ python 出现 3 次 (positions 1,2,3)
+        uint32_t expected_tf[3] = {4, 2, 3};
+        for (int i = 0; i < 3; ++i) {
+            if (entries[i].tf != expected_tf[i])
+                FAIL("doc" + std::to_string(i+1) + " tf expected "
+                     + std::to_string(expected_tf[i]) + ", got "
+                     + std::to_string(entries[i].tf));
+            if (entries[i].positions.size() != expected_tf[i])
+                FAIL("doc" + std::to_string(i+1) + " positions count mismatch");
+            // positions 必须严格递增
+            for (uint32_t j = 1; j < entries[i].positions.size(); ++j) {
+                if (entries[i].positions[j] <= entries[i].positions[j-1])
+                    FAIL("doc" + std::to_string(i+1) + " positions not ascending");
+            }
+        }
+
+        // total_term_freq = 4+2+3 = 9
+        const ii::TermMeta* meta = reader.getTermMeta("python");
+        if (!meta) FAIL("python not found in term dict");
+        if (meta->total_term_freq != 9)
+            FAIL("total_term_freq expected 9, got " + std::to_string(meta->total_term_freq));
+    }
+
+    std::filesystem::remove_all(dir);
+    PASS();
+}
+
 int main() {
     std::cout << "═══════════════════════════════════\n";
     std::cout << "  Inverted Index Unit Tests\n";
@@ -339,6 +432,7 @@ int main() {
 
     // Merger integration test
     test_soft_delete_and_merge();
+    test_merge_tf_and_positions();
 
     std::cout << "\n═══════════════════════════════════\n";
     std::cout << "  All tests PASSED!\n";

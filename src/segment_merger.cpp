@@ -53,7 +53,7 @@ SegmentMerger::SegmentMerger(const std::string& dir) : dir_(dir) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 软删除：在所有 Segment 中找到 doc_id 并在 .liv 中标记
 // ─────────────────────────────────────────────────────────────────────────────
-
+// TODO：软删除并没有并发控制, 所以只是toy版本，需要保证并发读写问题；
 bool SegmentMerger::softDelete(DocId doc_id) {
     for (auto& reader : readers_) {
         if (reader->isAlive(doc_id)) {
@@ -147,7 +147,7 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
     // 重映射去掉被软删除的 doc，重新从 1 连续编号
     struct GlobalDoc {
         uint32_t seg_id;
-        DocId    local_doc_id;
+        DocId    orig_doc_id;   // .fdt 中存储的原始 doc_id
         std::string title, body, category;
     };
     std::vector<GlobalDoc> alive_docs;
@@ -176,14 +176,13 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                 ++total_deleted;
                 continue;
             }
-            // 存活：分配新 ID
-            uint64_t key = ((uint64_t)sid << 20) | local;
-            remap[key] = new_id;
-
+            // 存活：用 .fdt 中存储的原始 doc_id 作为 key，与 .pos 保持一致
             auto stored = reader->readStoredDoc(local);
+            uint64_t key = ((uint64_t)sid << 20) | stored.doc_id;
+            remap[key] = new_id;
             GlobalDoc gd;
-            gd.seg_id       = sid;
-            gd.local_doc_id = local;
+            gd.seg_id      = sid;
+            gd.orig_doc_id = stored.doc_id;
             gd.title        = stored.title;
             gd.body         = stored.body;
             gd.category     = stored.category;
@@ -259,20 +258,18 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
             const TermMeta* tm = reader->getTermMeta(term);
             if (!tm) continue;
 
-            // 读该 term 的 posting list（doc_id 列表）
-            auto doc_ids = reader->readPostingList(term);
+            // 从 .pos 读取该 term 的真实 tf 和位置信息
+            auto pos_entries = reader->readPosEntries(term);
 
-            for (DocId old_id : doc_ids) {
-                if (!reader->isAlive(old_id)) continue;  // 跳过已删除
-
-                uint64_t key = ((uint64_t)sid << 20) | old_id;
+            for (const auto& entry : pos_entries) {
+                // remap 已在 step1 过滤死文档，查不到即跳过
+                uint64_t key = ((uint64_t)sid << 20) | entry.doc_id;
                 auto it = remap.find(key);
                 if (it == remap.end()) continue;
                 DocId new_doc_id = it->second;
 
-                // tf 简化为 1（完整实现应从 .pos 读取）
-                merged.push_back({new_doc_id, 1});
-                merged_pos.push_back({new_doc_id, {0}});
+                merged.push_back({new_doc_id, entry.tf});
+                merged_pos.push_back({new_doc_id, entry.positions});
             }
         }
 
@@ -286,7 +283,10 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         uint32_t df   = (uint32_t)merged.size();
         float    idf  = std::log(1.0f + (float)(output_doc_count - df + 0.5f)
                                        / (float)(df + 0.5f));
-        float    ub   = (1.0f * (k1+1.0f) / (1.0f + k1*(1.0f-b_param+b_param))) * idf;
+        uint32_t max_tf = 0;
+        for (auto& [did, tf] : merged) max_tf = std::max(max_tf, tf);
+        float max_tf_f = static_cast<float>(max_tf > 0 ? max_tf : 1);
+        float    ub   = (max_tf_f * (k1+1.0f) / (max_tf_f + k1*(1.0f-b_param+b_param))) * idf;
 
         // 提取 doc_id 列表
         std::vector<DocId> new_doc_ids;
@@ -304,7 +304,9 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         // 记录偏移
         NewTermMeta ntm;
         ntm.df             = df;
-        ntm.total_tf       = df;  // 简化
+        uint32_t total_tf = 0;
+        for (auto& [did, tf] : merged) total_tf += tf;
+        ntm.total_tf       = total_tf;
         ntm.skip_offset    = (uint64_t)fdoc.tellp();
         ntm.posting_offset = ntm.skip_offset + sl_bytes.size();
         ntm.pos_offset     = (uint64_t)fpos.tellp();
@@ -349,7 +351,7 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                            std::ios::binary|std::ios::trunc);
         for (const auto& gd : alive_docs) {
             fdx_offsets.push_back((uint64_t)ffdt.tellp());
-            DocId new_doc_id = remap[((uint64_t)gd.seg_id << 20) | gd.local_doc_id];
+            DocId new_doc_id = remap[((uint64_t)gd.seg_id << 20) | gd.orig_doc_id];
             wU32(ffdt, new_doc_id);
             wStr(ffdt, gd.title);
             wStr(ffdt, gd.body);

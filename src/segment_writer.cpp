@@ -163,6 +163,7 @@ void SegmentWriter::writeTim(
         writeStr(f, term);
         writeU32(f, meta.doc_freq);
         writeU32(f, meta.total_term_freq);
+        // TODO: 虽然这里是占位符号,但是后面重写3次，可以优化
         writeU64(f, 0);  // posting_offset placeholder
         writeU64(f, 0);  // skip_offset placeholder
         writeU64(f, 0);  // pos_offset placeholder
