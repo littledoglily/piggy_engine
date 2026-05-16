@@ -29,11 +29,12 @@ struct Args {
     std::string   query;           // 空 → 交互模式
     ii::QueryMode mode  = ii::QueryMode::OR;
     int           top   = 10;
+    bool          debug = false;   // --debug：打印 IDF/SkipNode/UB 调试信息
 };
 
 static void usage(const char* prog) {
     std::cerr << "Usage: " << prog
-              << " --index <dir> [--query <text>] [--mode AND|OR] [--top N]\n";
+              << " --index <dir> [--query <text>] [--mode AND|OR] [--top N] [--debug]\n";
     std::exit(1);
 }
 
@@ -44,6 +45,7 @@ static Args parseArgs(int argc, char** argv) {
         if      (f == "--index" && i+1 < argc) { a.index_dir = argv[++i]; }
         else if (f == "--query" && i+1 < argc) { a.query     = argv[++i]; }
         else if (f == "--top"   && i+1 < argc) { a.top       = std::stoi(argv[++i]); }
+        else if (f == "--debug")               { a.debug     = true; }
         else if (f == "--mode"  && i+1 < argc) {
             std::string m = argv[++i];
             if (m == "AND") a.mode = ii::QueryMode::AND;
@@ -107,6 +109,7 @@ int main(int argc, char** argv) {
 
     std::cout << "[Searcher] Loading index from: " << args.index_dir << "\n";
     ii::IndexSearcher searcher(args.index_dir);
+    if (args.debug) searcher.setDebug(true);
     std::cout << "[Searcher] Ready.\n";
 
     auto runQuery = [&](const std::string& q) {

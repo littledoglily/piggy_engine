@@ -1,8 +1,10 @@
 #include "query/index_searcher.h"
+#include "postings/skiplist.h"
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <sstream>
 #include <stdexcept>
 
@@ -50,20 +52,46 @@ IndexSearcher::IndexSearcher(const std::string& dir) {
 std::unordered_map<std::string, float> IndexSearcher::computeTermIdfs(
     const std::vector<std::string>& terms) const
 {
+    if (debug_) {
+        printf("\n[IDF] N=%u  (global_total_docs)\n", global_total_docs_);
+        printf("  %-14s  %-28s  %-12s  %s\n",
+               "term", "per-seg df", "global_df", "IDF = log(1+(N-df+0.5)/(df+0.5))");
+        printf("  %s\n", std::string(80, '-').c_str());
+    }
+
     std::unordered_map<std::string, float> result;
     for (const auto& term : terms) {
         uint32_t global_df = 0;
+        std::string seg_breakdown;
+
         for (const auto& seg : segments_) {
             const TermMeta* m = seg->getTermMeta(term);
-            if (m) global_df += m->doc_freq;
+            uint32_t df = m ? m->doc_freq : 0;
+            global_df += df;
+            if (debug_) {
+                if (!seg_breakdown.empty()) seg_breakdown += "  ";
+                seg_breakdown += "seg" + std::to_string(seg->segmentId())
+                               + ":df=" + std::to_string(df);
+            }
         }
+
         if (global_df == 0) {
             result[term] = 0.0f;
+            if (debug_)
+                printf("  \"%-12s\"  %-28s  %-12u  (not found, IDF=0)\n",
+                       term.c_str(), seg_breakdown.c_str(), global_df);
             continue;
         }
+
         float N   = static_cast<float>(global_total_docs_);
         float df  = static_cast<float>(global_df);
-        result[term] = std::log(1.0f + (N - df + 0.5f) / (df + 0.5f));
+        float idf = std::log(1.0f + (N - df + 0.5f) / (df + 0.5f));
+        result[term] = idf;
+
+        if (debug_)
+            printf("  \"%-12s\"  %-28s  %-12u  log(1+(%.1f-%.1f+0.5)/(%.1f+0.5)) = %.4f\n",
+                   term.c_str(), seg_breakdown.c_str(),
+                   global_df, N, df, df, idf);
     }
     return result;
 }
@@ -183,6 +211,8 @@ std::vector<SearchResult> IndexSearcher::searchAND(
         if (!seg.getTermMeta(t)) return {};
     }
 
+    if (debug_) printTermDebug(seg, terms, term_idfs);
+
     std::vector<std::vector<DocId>> lists;
     lists.reserve(terms.size());
     for (const auto& t : terms) {
@@ -265,6 +295,8 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
             return ptr < docs.size() ? docs[ptr] : INVALID_DOC;
         }
     };
+
+    if (debug_) printTermDebug(seg, terms, term_idfs);
 
     std::vector<TermCursor> cursors;
     for (const auto& t : terms) {
@@ -373,6 +405,56 @@ std::vector<SearchResult> IndexSearcher::mergeTopK(
     });
     if ((int)all.size() > top_k) all.resize(top_k);
     return all;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// printTermDebug：打印每个 term 的 SkipNode 列表 + UB 验证（--debug 模式）
+//
+// 输出三类信息：
+//   1. SkipNode 列表：每个 Block 的 max_doc/max_score/byte_offset/doc_count
+//   2. UB 验证：stored max_tf_norm × online IDF = effective UB（WAND 剪枝阈值）
+// ─────────────────────────────────────────────────────────────────────────────
+
+void IndexSearcher::printTermDebug(
+    const SegmentReader& seg,
+    const std::vector<std::string>& terms,
+    const std::unordered_map<std::string, float>& term_idfs) const
+{
+    printf("\n[TermDebug] seg=%u\n", seg.segmentId());
+    printf("  %-14s  %-6s  %-5s  %s\n", "term", "df", "nodes", "SkipNode list  +  UB verify");
+    printf("  %s\n", std::string(78, '-').c_str());
+
+    for (const auto& t : terms) {
+        const TermMeta* meta = seg.getTermMeta(t);
+        if (!meta) {
+            printf("  \"%-12s\"  (not in seg%u)\n", t.c_str(), seg.segmentId());
+            continue;
+        }
+
+        SkipList sl = seg.readTermSkipList(t);
+        printf("  \"%-12s\"  df=%-5u  nodes=%zu\n",
+               t.c_str(), meta->doc_freq, sl.size());
+
+        if (sl.empty()) {
+            printf("    (single block — df <= 128, no skip nodes needed)\n");
+        } else {
+            printf("    %-6s  %-8s  %-10s  %-10s  %s\n",
+                   "idx", "max_doc", "max_score", "byte_off", "docs");
+            for (size_t i = 0; i < sl.size(); ++i) {
+                const SkipNode& n = sl.node(i);
+                printf("    [%4zu]  %-8u  %-10.4f  %-10llu  %u\n",
+                       i, n.max_doc_id, n.max_score,
+                       (unsigned long long)n.byte_offset, n.doc_count);
+            }
+        }
+
+        auto idf_it = term_idfs.find(t);
+        float idf     = (idf_it != term_idfs.end()) ? idf_it->second : 0.0f;
+        float eff_ub  = meta->upper_bound * idf;
+        // upper_bound 在 flush 时存的是 max_tf_norm（不含 IDF），查询期乘以 global IDF 才是真正 UB
+        printf("  [UB verify] max_tf_norm(stored)=%.4f × IDF=%.4f → effective_UB=%.4f\n\n",
+               meta->upper_bound, idf, eff_ub);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

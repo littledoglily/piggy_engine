@@ -3,8 +3,16 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <cstdint>
 
 namespace ii {
+
+// ── FastField 写入统计（flush 时采集）────────────────────────────────────────
+struct FFWriteStats {
+    std::map<std::string, uint64_t> file_bytes;  // 字段名 → 文件字节数
+    uint64_t total_bytes = 0;
+    uint64_t total_us    = 0;                    // 写入耗时（微秒）
+};
 
 // FastFieldWriter：将数值字段按列写入磁盘
 //
@@ -21,7 +29,7 @@ public:
     void addInt64  (const std::string& field, int64_t val);
     void addFloat32(const std::string& field, float   val);
 
-    void flush(const std::string& dir, uint32_t seg_id) const;
+    FFWriteStats flush(const std::string& dir, uint32_t seg_id) const;
     void clear();
 
     size_t size() const;

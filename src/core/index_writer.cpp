@@ -3,6 +3,7 @@
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
+#include <cstdio>
 
 namespace ii {
 
@@ -128,18 +129,83 @@ void IndexWriter::flush() {
         : 0.0f;
 
     SegmentWriter seg_writer(dir_, next_seg_id_);
-    seg_writer.flush(mem_index_, stored_docs_buf_,
-                     static_cast<uint32_t>(stored_docs_buf_.size()),
-                     avg_doc_len);
+    auto seg_stats = seg_writer.flush(mem_index_, stored_docs_buf_,
+                                      static_cast<uint32_t>(stored_docs_buf_.size()),
+                                      avg_doc_len);
 
-    // FastField 独立 flush（IndexWriter 直接负责）
-    ff_writer_.flush(dir_, next_seg_id_);
+    auto ff_stats = ff_writer_.flush(dir_, next_seg_id_);
+
+    printFlushStats(seg_stats, ff_stats);
+
+    seg_stats_history_.push_back(seg_stats);
+    ff_stats_history_.push_back(ff_stats);
 
     ++next_seg_id_;
     mem_index_ = InMemoryIndex();
     stored_docs_buf_.clear();
     ff_writer_.clear();
     total_tokens_ = 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// printFlushStats：格式化打印 segment 构建统计
+// ─────────────────────────────────────────────────────────────────────────────
+
+void IndexWriter::printFlushStats(const SegmentWriteStats& seg,
+                                  const FFWriteStats&      ff)
+{
+    auto kb = [](uint64_t b) { return static_cast<double>(b) / 1024.0; };
+    auto ms = [](uint64_t us) { return static_cast<double>(us) / 1000.0; };
+
+    uint64_t total_bytes = seg.totalSegBytes() + ff.total_bytes;
+    uint64_t total_us    = seg.totalSegUs()    + ff.total_us;
+
+    printf("╔══════════════════════════════════════════════════════════════╗\n");
+    printf("║  Segment _%u — Build Stats%*s║\n",
+           seg.segment_id, (int)(36 - std::to_string(seg.segment_id).size()), "");
+    printf("╠══════════════════════════════════════════════════════════════╣\n");
+    printf("║  Docs: %5u   Terms: %5u%*s║\n",
+           seg.doc_count, seg.term_count, 30, "");
+    printf("╠═══════════════ Posting List ═════════════════════════════════╣\n");
+    printf("║  Total entries : %7llu  (avg %6.1f / term)%*s║\n",
+           (unsigned long long)seg.total_pl_entries, seg.avg_pl_df, 12, "");
+    printf("║  Max df        : %7u  term=\"%s\"%*s║\n",
+           seg.max_pl_df, seg.max_pl_term.c_str(),
+           (int)(20 - (int)seg.max_pl_term.size()), "");
+    printf("║  Skip nodes    : %7llu  total  (avg %5.2f / term)%*s║\n",
+           (unsigned long long)seg.total_skip_nodes,
+           seg.avg_skip_nodes_per_term, 9, "");
+    printf("║  Max skip nodes: %7u  term=\"%s\"%*s║\n",
+           seg.max_skip_nodes, seg.max_skip_term.c_str(),
+           (int)(20 - (int)seg.max_skip_term.size()), "");
+    printf("╠═══════════════  File Sizes  ═════════════════════════════════╣\n");
+    printf("║  .tim        : %8.1f KB  [%6.2f ms]%*s║\n",
+           kb(seg.tim_bytes), ms(seg.tim_us), 18, "");
+    printf("║  .doc        : %8.1f KB  [%6.2f ms]%*s║\n",
+           kb(seg.doc_bytes), ms(seg.doc_us), 18, "");
+    printf("║  .pos        : %8.1f KB  [%6.2f ms]%*s║\n",
+           kb(seg.pos_bytes), ms(seg.pos_us), 18, "");
+    printf("║  .fdt + .fdx : %8.1f KB  [%6.2f ms]%*s║\n",
+           kb(seg.fdt_bytes + seg.fdx_bytes), ms(seg.fdt_fdx_us), 18, "");
+    printf("║  .liv        : %8.1f KB%*s║\n", kb(seg.liv_bytes), 27, "");
+    printf("║  .si         : %8.1f KB%*s║\n", kb(seg.si_bytes),  27, "");
+    if (!ff.file_bytes.empty()) {
+        bool first = true;
+        for (const auto& [field, bytes] : ff.file_bytes) {
+            if (first) {
+                printf("║  .ff_%-9s: %8.1f KB  } ff total: %5.2f ms%*s║\n",
+                       field.c_str(), kb(bytes), ms(ff.total_us), 6, "");
+                first = false;
+            } else {
+                printf("║  .ff_%-9s: %8.1f KB%*s║\n",
+                       field.c_str(), kb(bytes), 27, "");
+            }
+        }
+    }
+    printf("╠═══════════════  Totals  ═════════════════════════════════════╣\n");
+    printf("║  Total size  : %8.1f KB%*s║\n", kb(total_bytes), 27, "");
+    printf("║  Total time  : %8.2f ms%*s║\n", ms(total_us),    27, "");
+    printf("╚══════════════════════════════════════════════════════════════╝\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

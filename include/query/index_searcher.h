@@ -50,6 +50,9 @@ public:
     // 打印搜索结果
     static void printResults(const std::vector<SearchResult>& results);
 
+    // 开启调试输出：IDF 全局信息、SkipNode 列表、UB 验证
+    void setDebug(bool v) { debug_ = v; }
+
 private:
     // 基于全局统计为每个 query term 计算 {term -> global_idf}
     std::unordered_map<std::string, float> computeTermIdfs(
@@ -85,6 +88,11 @@ private:
         int top_k
     ) const;
 
+    // 调试：打印每个 term 的 SkipNode 列表 + UB 验证（--debug 模式）
+    void printTermDebug(const SegmentReader& seg,
+                        const std::vector<std::string>& terms,
+                        const std::unordered_map<std::string, float>& term_idfs) const;
+
     // ── WAND 内部：优先队列比较器 ────────────────────────────────────────────
     struct HeapEntry {
         float score;
@@ -96,6 +104,7 @@ private:
     Analyzer analyzer_;
     std::vector<std::unique_ptr<SegmentReader>> segments_;
     uint32_t global_total_docs_ = 0;
+    mutable bool debug_ = false;
 };
 
 } // namespace ii

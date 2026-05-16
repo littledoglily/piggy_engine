@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <cstdint>
 
 namespace ii {
 
@@ -38,6 +39,8 @@ public:
 
 private:
     size_t estimateRamUsage() const;
+    static void printFlushStats(const SegmentWriteStats& seg,
+                                const FFWriteStats&      ff);
 
     // 从 Document 按字段名取值（过渡桥接，保持 Document 为具名结构体）
     static std::string getDocText  (const Document& doc, const std::string& name);
@@ -57,6 +60,14 @@ private:
     uint32_t total_docs_   = 0;
     uint32_t next_seg_id_  = 0;
     uint64_t total_tokens_ = 0;
+
+    // 每次 flush 后追加，commit() 后可通过 getter 读取
+    std::vector<SegmentWriteStats> seg_stats_history_;
+    std::vector<FFWriteStats>      ff_stats_history_;
+
+public:
+    const std::vector<SegmentWriteStats>& segStatsHistory() const { return seg_stats_history_; }
+    const std::vector<FFWriteStats>&      ffStatsHistory()  const { return ff_stats_history_; }
 };
 
 } // namespace ii

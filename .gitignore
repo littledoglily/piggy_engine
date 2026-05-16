@@ -24,6 +24,7 @@ out/
 *.ff_page_rank
 *.bkd_*
 segments_*
+test_index*
 
 # ── macOS 系统文件 ────────────────────────────────────────────────────────────
 .DS_Store
@@ -36,6 +37,9 @@ segments_*
 *.swp
 *.swo
 *~
+
+# 本地文件
+schema.json
 
 # ── 编译数据库（clangd 生成，不需要提交）─────────────────────────────────────
 compile_commands.json

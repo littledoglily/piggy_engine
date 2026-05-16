@@ -1,5 +1,7 @@
 #include "fastfield/fast_field_writer.h"
 #include <fstream>
+#include <filesystem>
+#include <chrono>
 #include <stdexcept>
 
 namespace ii {
@@ -25,21 +27,37 @@ void FastFieldWriter::add(const FastFieldDoc& doc) {
     addFloat32("page_rank", doc.page_rank);
 }
 
-void FastFieldWriter::flush(const std::string& dir, uint32_t seg_id) const {
+FFWriteStats FastFieldWriter::flush(const std::string& dir, uint32_t seg_id) const {
+    using Clock = std::chrono::steady_clock;
+    FFWriteStats stats;
+    auto t0 = Clock::now();
+
     for (const auto& [field, data] : int64_fields_) {
-        std::ofstream f(ffPath(dir, seg_id, field),
-                        std::ios::binary | std::ios::trunc);
+        auto p = ffPath(dir, seg_id, field);
+        std::ofstream f(p, std::ios::binary | std::ios::trunc);
         if (!f) throw std::runtime_error("Cannot open ff file: " + field);
         f.write(reinterpret_cast<const char*>(data.data()),
                 static_cast<std::streamsize>(data.size() * sizeof(int64_t)));
+        f.close();
+        uint64_t bytes = std::filesystem::file_size(p);
+        stats.file_bytes[field] = bytes;
+        stats.total_bytes += bytes;
     }
     for (const auto& [field, data] : float32_fields_) {
-        std::ofstream f(ffPath(dir, seg_id, field),
-                        std::ios::binary | std::ios::trunc);
+        auto p = ffPath(dir, seg_id, field);
+        std::ofstream f(p, std::ios::binary | std::ios::trunc);
         if (!f) throw std::runtime_error("Cannot open ff file: " + field);
         f.write(reinterpret_cast<const char*>(data.data()),
                 static_cast<std::streamsize>(data.size() * sizeof(float)));
+        f.close();
+        uint64_t bytes = std::filesystem::file_size(p);
+        stats.file_bytes[field] = bytes;
+        stats.total_bytes += bytes;
     }
+
+    stats.total_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        Clock::now() - t0).count();
+    return stats;
 }
 
 void FastFieldWriter::clear() {

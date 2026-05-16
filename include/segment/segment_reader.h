@@ -66,6 +66,12 @@ public:
     // 暴露词典（工具/调试用）
     const std::map<std::string, TermMeta>& termDict() const { return term_dict_; }
 
+    // 读取 term 的 SkipList（调试/统计用）
+    SkipList readTermSkipList(const std::string& term) const {
+        const TermMeta* m = getTermMeta(term);
+        return m ? readSkipList(*m) : SkipList{};
+    }
+
     // 计算 BM25 score（单 doc，多 term）
     // term_idfs：由 IndexSearcher 基于全局统计预算的 {term -> global_idf}
     float bm25Score(DocId doc_id,

@@ -239,9 +239,124 @@ static void printSchema(const ii::Schema& schema) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// BuildResult：buildIndex 返回的构建结果（含 per-segment 统计）
+// ─────────────────────────────────────────────────────────────────────────────
+struct BuildResult {
+    uint64_t doc_count  = 0;
+    uint64_t skip_count = 0;
+    double   elapsed_s  = 0.0;
+    std::vector<ii::SegmentWriteStats> seg_stats;
+    std::vector<ii::FFWriteStats>      ff_stats;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// printBuildSummary：构建完成后打印跨 segment 汇总表
+// ─────────────────────────────────────────────────────────────────────────────
+static void printBuildSummary(const BuildResult& r) {
+    if (r.seg_stats.empty()) return;
+
+    auto kb = [](uint64_t b)  { return static_cast<double>(b) / 1024.0; };
+    auto ms = [](uint64_t us) { return static_cast<double>(us) / 1000.0; };
+
+    // 累计值
+    uint64_t tot_docs = 0, tot_terms = 0;
+    uint64_t tot_pl   = 0, tot_skip  = 0;
+    uint64_t tot_tim  = 0, tot_doc   = 0, tot_pos   = 0, tot_fdtfdx = 0;
+    uint64_t tot_seg_bytes = 0, tot_ff_bytes = 0;
+    uint64_t tot_tim_us = 0, tot_doc_us = 0, tot_pos_us = 0, tot_fdtfdx_us = 0, tot_ff_us = 0;
+
+    std::cout << "\n" << std::string(80, '=') << "\n";
+    std::cout << "  Segment Build Summary  (" << r.seg_stats.size() << " segment(s))\n";
+    std::cout << std::string(80, '=') << "\n";
+
+    // 表头
+    std::cout << std::left
+              << std::setw(6)  << "SegID"
+              << std::setw(7)  << "Docs"
+              << std::setw(7)  << "Terms"
+              << std::setw(9)  << "PLentry"
+              << std::setw(8)  << "Skip"
+              << std::setw(9)  << ".tim KB"
+              << std::setw(9)  << ".doc KB"
+              << std::setw(9)  << ".pos KB"
+              << std::setw(11) << ".fdt+fdx KB"
+              << std::setw(9)  << "FF KB"
+              << std::setw(9)  << "Total KB"
+              << "Time ms\n";
+    std::cout << std::string(80, '-') << "\n";
+
+    for (size_t i = 0; i < r.seg_stats.size(); ++i) {
+        const auto& s  = r.seg_stats[i];
+        const auto& ff = r.ff_stats[i];
+        uint64_t seg_total_us = s.totalSegUs() + ff.total_us;
+
+        std::cout << std::left
+                  << std::setw(6)  << ("_" + std::to_string(s.segment_id))
+                  << std::setw(7)  << s.doc_count
+                  << std::setw(7)  << s.term_count
+                  << std::setw(9)  << s.total_pl_entries
+                  << std::setw(8)  << s.total_skip_nodes
+                  << std::fixed << std::setprecision(1)
+                  << std::setw(9)  << kb(s.tim_bytes)
+                  << std::setw(9)  << kb(s.doc_bytes)
+                  << std::setw(9)  << kb(s.pos_bytes)
+                  << std::setw(11) << kb(s.fdt_bytes + s.fdx_bytes)
+                  << std::setw(9)  << kb(ff.total_bytes)
+                  << std::setw(9)  << kb(s.totalSegBytes() + ff.total_bytes)
+                  << ms(seg_total_us) << "\n";
+
+        tot_docs      += s.doc_count;
+        tot_terms     += s.term_count;
+        tot_pl        += s.total_pl_entries;
+        tot_skip      += s.total_skip_nodes;
+        tot_tim       += s.tim_bytes;
+        tot_doc       += s.doc_bytes;
+        tot_pos       += s.pos_bytes;
+        tot_fdtfdx    += s.fdt_bytes + s.fdx_bytes;
+        tot_ff_bytes  += ff.total_bytes;
+        tot_seg_bytes += s.totalSegBytes();
+        tot_tim_us    += s.tim_us;
+        tot_doc_us    += s.doc_us;
+        tot_pos_us    += s.pos_us;
+        tot_fdtfdx_us += s.fdt_fdx_us;
+        tot_ff_us     += ff.total_us;
+    }
+
+    std::cout << std::string(80, '-') << "\n";
+    std::cout << std::left
+              << std::setw(6)  << "Total"
+              << std::setw(7)  << tot_docs
+              << std::setw(7)  << tot_terms
+              << std::setw(9)  << tot_pl
+              << std::setw(8)  << tot_skip
+              << std::fixed << std::setprecision(1)
+              << std::setw(9)  << kb(tot_tim)
+              << std::setw(9)  << kb(tot_doc)
+              << std::setw(9)  << kb(tot_pos)
+              << std::setw(11) << kb(tot_fdtfdx)
+              << std::setw(9)  << kb(tot_ff_bytes)
+              << std::setw(9)  << kb(tot_seg_bytes + tot_ff_bytes)
+              << ms(tot_tim_us + tot_doc_us + tot_pos_us + tot_fdtfdx_us + tot_ff_us) << "\n";
+
+    std::cout << std::string(80, '=') << "\n";
+
+    // 写文件时间明细（总计）
+    std::cout << "  Write time breakdown (total across all segments):\n";
+    std::cout << "    .tim      : " << std::setw(8) << ms(tot_tim_us)    << " ms\n";
+    std::cout << "    .doc      : " << std::setw(8) << ms(tot_doc_us)    << " ms\n";
+    std::cout << "    .pos      : " << std::setw(8) << ms(tot_pos_us)    << " ms\n";
+    std::cout << "    .fdt+.fdx : " << std::setw(8) << ms(tot_fdtfdx_us) << " ms\n";
+    std::cout << "    .ff       : " << std::setw(8) << ms(tot_ff_us)     << " ms\n";
+    std::cout << "    index I/O : " << std::setw(8)
+              << ms(tot_tim_us + tot_doc_us + tot_pos_us + tot_fdtfdx_us + tot_ff_us)
+              << " ms  (wall time: " << std::setprecision(2) << r.elapsed_s << "s)\n";
+    std::cout << std::string(80, '=') << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 阶段一：构建索引
 // ─────────────────────────────────────────────────────────────────────────────
-static uint64_t buildIndex(const Args& args) {
+static BuildResult buildIndex(const Args& args) {
     // 收集所有文件路径并排序（保证确定性顺序）
     std::vector<fs::path> files;
     for (const auto& entry : fs::recursive_directory_iterator(args.input_dir)) {
@@ -266,9 +381,10 @@ static uint64_t buildIndex(const Args& args) {
 
     ii::IndexWriter writer(args.output_dir, args.ram_mb, schema);
 
-    uint64_t doc_count  = 0;
-    uint64_t skip_count = 0;
-    uint64_t file_count = 0;
+    BuildResult result;
+    uint64_t& doc_count  = result.doc_count;
+    uint64_t& skip_count = result.skip_count;
+    uint64_t file_count  = 0;
     auto t_start = Clock::now();
     auto t_last  = t_start;
 
@@ -316,17 +432,20 @@ static uint64_t buildIndex(const Args& args) {
     std::cout << "[Build] Committing index...\n";
     writer.commit();
 
-    double elapsed = std::chrono::duration<double>(Clock::now() - t_start).count();
+    result.elapsed_s  = std::chrono::duration<double>(Clock::now() - t_start).count();
+    result.seg_stats  = writer.segStatsHistory();
+    result.ff_stats   = writer.ffStatsHistory();
+
     std::cout << "[Build] Done.\n";
     std::cout << "[Build] Files processed : " << file_count << "\n";
     std::cout << "[Build] Docs indexed    : " << doc_count << "\n";
     std::cout << "[Build] Docs skipped    : " << skip_count << " (no indexable content)\n";
     std::cout << "[Build] Total time      : " << std::fixed << std::setprecision(2)
-              << elapsed << "s\n";
+              << result.elapsed_s << "s\n";
     std::cout << "[Build] Throughput      : " << std::setprecision(0)
-              << (doc_count / elapsed) << " docs/s\n";
+              << (doc_count / result.elapsed_s) << " docs/s\n";
 
-    return doc_count;
+    return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -481,7 +600,8 @@ int main(int argc, char** argv) {
 
     fs::create_directories(args.output_dir);
 
-    buildIndex(args);
+    BuildResult result = buildIndex(args);
+    printBuildSummary(result);
     printPostings(args, args.verbose);
 
     return 0;

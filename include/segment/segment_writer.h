@@ -16,8 +16,51 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <cstdint>
 
 namespace ii {
+
+// ── Segment 构建统计（flush 完成后返回）──────────────────────────────────────
+struct SegmentWriteStats {
+    uint32_t    segment_id  = 0;
+    uint32_t    doc_count   = 0;
+    uint32_t    term_count  = 0;
+
+    // Posting List 聚合
+    uint64_t    total_pl_entries = 0;  // Σ df
+    uint32_t    max_pl_df        = 0;
+    std::string max_pl_term;
+    float       avg_pl_df        = 0.f;
+
+    // SkipNode 聚合
+    uint64_t    total_skip_nodes         = 0;
+    uint32_t    max_skip_nodes           = 0;
+    std::string max_skip_term;
+    float       avg_skip_nodes_per_term  = 0.f;
+
+    // 文件大小（字节）
+    uint64_t    tim_bytes  = 0;
+    uint64_t    doc_bytes  = 0;
+    uint64_t    pos_bytes  = 0;
+    uint64_t    fdt_bytes  = 0;
+    uint64_t    fdx_bytes  = 0;
+    uint64_t    liv_bytes  = 0;
+    uint64_t    si_bytes   = 0;
+
+    // 写文件耗时（微秒）
+    uint64_t    tim_us     = 0;
+    uint64_t    doc_us     = 0;
+    uint64_t    pos_us     = 0;
+    uint64_t    fdt_fdx_us = 0;
+
+    uint64_t totalSegBytes() const {
+        return tim_bytes + doc_bytes + pos_bytes +
+               fdt_bytes + fdx_bytes + liv_bytes + si_bytes;
+    }
+    uint64_t totalSegUs() const {
+        return tim_us + doc_us + pos_us + fdt_fdx_us;
+    }
+};
 
 // ── Segment 元数据（写入 .si 文件）──────────────────────────────────────────
 struct SegmentInfo {
@@ -41,22 +84,24 @@ class SegmentWriter {
 public:
     explicit SegmentWriter(const std::string& dir, uint32_t segment_id);
 
-    // 主入口：将内存索引、文档原文一次性 flush 到磁盘
+    // 主入口：将内存索引、文档原文一次性 flush 到磁盘，返回构建统计
     // FastField 由 IndexWriter 独立管理（调用 FastFieldWriter::flush）
-    void flush(
+    SegmentWriteStats flush(
         const InMemoryIndex&          mem_index,
         const std::vector<StoredDoc>& stored_docs,
         uint32_t                      total_docs,
-        float                         avg_doc_len  // BM25 归一化用
+        float                         avg_doc_len
     );
 
 private:
     // ── 写各个文件 ───────────────────────────────────────────────────────────
     void writeTim(const InMemoryIndex& idx,
-                  std::map<std::string, TermMeta>& term_dict_out);
+                  std::map<std::string, TermMeta>& term_dict_out,
+                  SegmentWriteStats& stats);
 
     void writeDoc(const InMemoryIndex& idx,
-                  std::map<std::string, TermMeta>& term_dict);
+                  std::map<std::string, TermMeta>& term_dict,
+                  SegmentWriteStats& stats);
 
     void writePos(const InMemoryIndex& idx,
                   std::map<std::string, TermMeta>& term_dict);

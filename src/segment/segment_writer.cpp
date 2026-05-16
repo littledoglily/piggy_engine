@@ -2,6 +2,8 @@
 #include "postings/pfor_delta.h"
 #include "postings/skiplist.h"
 #include <fstream>
+#include <filesystem>
+#include <chrono>
 #include <cstring>
 #include <cmath>
 #include <ctime>
@@ -61,46 +63,78 @@ float SegmentWriter::calcMaxTfNorm(const PostingList& pl) {
 // flush：主入口
 // ─────────────────────────────────────────────────────────────────────────────
 
-void SegmentWriter::flush(
+SegmentWriteStats SegmentWriter::flush(
     const InMemoryIndex&          mem_index,
     const std::vector<StoredDoc>& stored_docs,
     uint32_t                      total_docs,
     float                         avg_doc_len)
 {
-    std::cout << "[SegmentWriter] Flushing segment " << seg_id_
-              << " (" << total_docs << " docs, "
-              << mem_index.termCount() << " terms)...\n";
+    using Clock = std::chrono::steady_clock;
+    namespace fs = std::filesystem;
 
-    // 1. 写 .tim（同时计算 term_dict，upper_bound 存 max_tf_norm）
+    SegmentWriteStats stats;
+    stats.segment_id = seg_id_;
+    stats.doc_count  = total_docs;
+
+    // 1. 写 .tim
     std::map<std::string, TermMeta> term_dict;
-    writeTim(mem_index, term_dict);
+    {
+        auto t = Clock::now();
+        writeTim(mem_index, term_dict, stats);
+        stats.tim_us    = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t).count();
+        stats.tim_bytes = fs::file_size(path("tim"));
+    }
 
-    // 2. 写 .doc（SkipList + PForDelta Block）
-    writeDoc(mem_index, term_dict);
+    // 2. 写 .doc
+    {
+        auto t = Clock::now();
+        writeDoc(mem_index, term_dict, stats);
+        stats.doc_us    = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t).count();
+        stats.doc_bytes = fs::file_size(path("doc"));
+    }
 
-    // 3. 写 .pos（位置信息）
-    writePos(mem_index, term_dict);
+    // 3. 写 .pos
+    {
+        auto t = Clock::now();
+        writePos(mem_index, term_dict);
+        stats.pos_us    = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t).count();
+        stats.pos_bytes = fs::file_size(path("pos"));
+    }
 
-    // 4. 写 .fdt / .fdx（文档原文）
-    std::vector<uint64_t> fdx_offsets;
-    writeFdt(stored_docs, fdx_offsets);
-    writeFdx(fdx_offsets);
+    // 4. 写 .fdt / .fdx
+    {
+        auto t = Clock::now();
+        std::vector<uint64_t> fdx_offsets;
+        writeFdt(stored_docs, fdx_offsets);
+        writeFdx(fdx_offsets);
+        stats.fdt_fdx_us = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t).count();
+        stats.fdt_bytes  = fs::file_size(path("fdt"));
+        stats.fdx_bytes  = fs::file_size(path("fdx"));
+    }
 
-    // 5. 写 .liv（存活位图，初始全 1）
+    // 5. 写 .liv
     writeLiv(total_docs);
+    stats.liv_bytes = fs::file_size(path("liv"));
 
-    // 6. 写 .si（元数据）
+    // 6. 写 .si
     SegmentInfo si;
-    si.segment_id  = seg_id_;
-    si.doc_count   = total_docs;
-    si.term_count  = static_cast<uint32_t>(mem_index.termCount());
+    si.segment_id = seg_id_;
+    si.doc_count  = total_docs;
+    si.term_count = static_cast<uint32_t>(mem_index.termCount());
     time_t now = time(nullptr);
     char tbuf[32];
     strftime(tbuf, sizeof(tbuf), "%Y-%m-%dT%H:%M:%S", localtime(&now));
-    si.created_at  = tbuf;
+    si.created_at = tbuf;
     writeSi(si);
+    stats.si_bytes = fs::file_size(path("si"));
 
-    std::cout << "[SegmentWriter] Segment " << seg_id_ << " flushed OK.\n";
+    // 聚合 posting list 统计（在 writeTim 中已收集 term_count / total_pl_entries / max_pl_df）
+    if (stats.term_count > 0) {
+        stats.avg_pl_df             = static_cast<float>(stats.total_pl_entries) / stats.term_count;
+        stats.avg_skip_nodes_per_term = static_cast<float>(stats.total_skip_nodes) / stats.term_count;
+    }
+
+    return stats;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,27 +154,36 @@ void SegmentWriter::flush(
 
 void SegmentWriter::writeTim(
     const InMemoryIndex&            idx,
-    std::map<std::string, TermMeta>& term_dict_out)
+    std::map<std::string, TermMeta>& term_dict_out,
+    SegmentWriteStats&               stats)
 {
     auto terms = idx.sortedTerms();
     std::ofstream f(path("tim"), std::ios::binary | std::ios::trunc);
     if (!f) throw std::runtime_error("Cannot open .tim: " + path("tim"));
 
     writeU32(f, static_cast<uint32_t>(terms.size()));
+    stats.term_count = static_cast<uint32_t>(terms.size());
 
     for (const auto& term : terms) {
         const PostingList* pl = idx.getPostingList(term);
         if (!pl) continue;
 
-        // upper_bound 存 max_tf_norm（不含 IDF），查询期 × global_idf 得真正 UB
         float max_tf_norm = calcMaxTfNorm(*pl);
+        uint32_t df = static_cast<uint32_t>(pl->size());
+
+        // 聚合 df 统计
+        stats.total_pl_entries += df;
+        if (df > stats.max_pl_df) {
+            stats.max_pl_df   = df;
+            stats.max_pl_term = term;
+        }
 
         TermMeta meta;
-        meta.doc_freq        = static_cast<uint32_t>(pl->size());
+        meta.doc_freq        = df;
         meta.total_term_freq = pl->totalTermFreq();
-        meta.posting_offset  = 0;  // 由 writeDoc 回填
+        meta.posting_offset  = 0;
         meta.skip_offset     = 0;
-        meta.pos_offset      = 0;  // 由 writePos 回填
+        meta.pos_offset      = 0;
         meta.upper_bound     = max_tf_norm;
 
         term_dict_out[term] = meta;
@@ -148,9 +191,9 @@ void SegmentWriter::writeTim(
         writeStr(f, term);
         writeU32(f, meta.doc_freq);
         writeU32(f, meta.total_term_freq);
-        writeU64(f, 0);  // posting_offset placeholder
-        writeU64(f, 0);  // skip_offset placeholder
-        writeU64(f, 0);  // pos_offset placeholder
+        writeU64(f, 0);
+        writeU64(f, 0);
+        writeU64(f, 0);
         writeF32(f, max_tf_norm);
     }
 }
@@ -165,7 +208,8 @@ void SegmentWriter::writeTim(
 
 void SegmentWriter::writeDoc(
     const InMemoryIndex&            idx,
-    std::map<std::string, TermMeta>& term_dict)
+    std::map<std::string, TermMeta>& term_dict,
+    SegmentWriteStats&               stats)
 {
     std::ofstream f(path("doc"), std::ios::binary | std::ios::trunc);
     if (!f) throw std::runtime_error("Cannot open .doc: " + path("doc"));
@@ -180,10 +224,17 @@ void SegmentWriter::writeDoc(
 
         auto& meta = term_dict[term];
 
-        // 取 doc_id 列表，压缩；传 max_tf_norm 供 block max_score 存储
         std::vector<DocId> doc_ids = pl->docIds();
         std::vector<SkipNode> skip_nodes;
         std::vector<uint8_t> compressed = PForDelta::compress(doc_ids, skip_nodes, meta.upper_bound);
+
+        // 聚合 skipnode 统计
+        uint32_t sn_count = static_cast<uint32_t>(skip_nodes.size());
+        stats.total_skip_nodes += sn_count;
+        if (sn_count > stats.max_skip_nodes) {
+            stats.max_skip_nodes = sn_count;
+            stats.max_skip_term  = term;
+        }
 
         // 构建并序列化 SkipList
         SkipList sl(skip_nodes);
