@@ -44,28 +44,17 @@ std::string SegmentWriter::path(const std::string& ext) const {
 // BM25 辅助
 // ─────────────────────────────────────────────────────────────────────────────
 
-float SegmentWriter::calcIdf(uint32_t df, uint32_t total_docs) {
-    if (df == 0) return 0.0f;
-    return std::log(1.0f + (float)(total_docs - df + 0.5f) / (float)(df + 0.5f));
-}
-
-float SegmentWriter::calcUB(const PostingList& pl,
-                             float idf,
-                             float avg_doc_len)
-{
-    // UB = max over all docs { tf_norm × idf }
-    // tf_norm = tf × (k1+1) / (tf + k1 × (1 - b + b × dl/avgdl))
-    // 简化：假设 dl ≈ avg_doc_len（各 doc 长度相近），dl/avgdl=1
-    const float k1 = 1.2f, b_param = 0.75f;
-    float max_ub = 0.0f;
+float SegmentWriter::calcMaxTfNorm(const PostingList& pl) {
+    // max_tf_norm = max over all docs { tf × (k1+1) / (tf + k1) }
+    // 使用 dl=avgdl 简化（k1=1.2，b 项消去），结果不依赖全局 N 和 IDF
+    const float k1 = 1.2f;
+    float max_norm = 0.0f;
     for (const auto& e : pl.entries()) {
         float tf   = static_cast<float>(e.tf);
-        float norm = tf * (k1 + 1.0f) /
-                     (tf + k1 * (1.0f - b_param + b_param));
-        float score = norm * idf;
-        max_ub = std::max(max_ub, score);
+        float norm = tf * (k1 + 1.0f) / (tf + k1);
+        max_norm   = std::max(max_norm, norm);
     }
-    return max_ub;
+    return max_norm;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -82,12 +71,12 @@ void SegmentWriter::flush(
               << " (" << total_docs << " docs, "
               << mem_index.termCount() << " terms)...\n";
 
-    // 1. 写 .tim（同时计算 term_dict）
+    // 1. 写 .tim（同时计算 term_dict，upper_bound 存 max_tf_norm）
     std::map<std::string, TermMeta> term_dict;
-    writeTim(mem_index, term_dict, total_docs, avg_doc_len);
+    writeTim(mem_index, term_dict);
 
     // 2. 写 .doc（SkipList + PForDelta Block）
-    writeDoc(mem_index, term_dict, avg_doc_len, total_docs);
+    writeDoc(mem_index, term_dict);
 
     // 3. 写 .pos（位置信息）
     writePos(mem_index, term_dict);
@@ -131,9 +120,7 @@ void SegmentWriter::flush(
 
 void SegmentWriter::writeTim(
     const InMemoryIndex&            idx,
-    std::map<std::string, TermMeta>& term_dict_out,
-    uint32_t total_docs,
-    float    avg_doc_len)
+    std::map<std::string, TermMeta>& term_dict_out)
 {
     auto terms = idx.sortedTerms();
     std::ofstream f(path("tim"), std::ios::binary | std::ios::trunc);
@@ -144,30 +131,27 @@ void SegmentWriter::writeTim(
     for (const auto& term : terms) {
         const PostingList* pl = idx.getPostingList(term);
         if (!pl) continue;
-        // FIX: 离线计算IDF和UB的值是有问题，因为离线构建的时候segment中拿到的total doc是局部的；应该在线请求的时候先收集全局的doc数量，再检索的时候分发给每个segment进行实时计算
-        float idf = calcIdf(pl->size(), total_docs);
-        float ub  = calcUB(*pl, idf, avg_doc_len);
+
+        // upper_bound 存 max_tf_norm（不含 IDF），查询期 × global_idf 得真正 UB
+        float max_tf_norm = calcMaxTfNorm(*pl);
 
         TermMeta meta;
         meta.doc_freq        = static_cast<uint32_t>(pl->size());
         meta.total_term_freq = pl->totalTermFreq();
-        meta.posting_offset  = 0;  // 由 writeDoc 回填（此处写 placeholder）
+        meta.posting_offset  = 0;  // 由 writeDoc 回填
         meta.skip_offset     = 0;
         meta.pos_offset      = 0;  // 由 writePos 回填
-        meta.upper_bound     = ub;
+        meta.upper_bound     = max_tf_norm;
 
-        // 记录在词典中（供 writeDoc 使用）
         term_dict_out[term] = meta;
 
-        // 写入文件
         writeStr(f, term);
         writeU32(f, meta.doc_freq);
         writeU32(f, meta.total_term_freq);
-        // TODO: 虽然这里是占位符号,但是后面重写3次，可以优化
         writeU64(f, 0);  // posting_offset placeholder
         writeU64(f, 0);  // skip_offset placeholder
         writeU64(f, 0);  // pos_offset placeholder
-        writeF32(f, ub);
+        writeF32(f, max_tf_norm);
     }
 }
 
@@ -181,14 +165,11 @@ void SegmentWriter::writeTim(
 
 void SegmentWriter::writeDoc(
     const InMemoryIndex&            idx,
-    std::map<std::string, TermMeta>& term_dict,
-    float    avg_doc_len,
-    uint32_t total_docs)
+    std::map<std::string, TermMeta>& term_dict)
 {
     std::ofstream f(path("doc"), std::ios::binary | std::ios::trunc);
     if (!f) throw std::runtime_error("Cannot open .doc: " + path("doc"));
 
-    // 先写 term 数量（读取端用于跳过整个 term 块）
     uint32_t term_count = static_cast<uint32_t>(term_dict.size());
     writeU32(f, term_count);
 
@@ -198,12 +179,11 @@ void SegmentWriter::writeDoc(
         if (!pl) continue;
 
         auto& meta = term_dict[term];
-        float idf = calcIdf(pl->size(), total_docs);
 
-        // 取 doc_id 列表，压缩
+        // 取 doc_id 列表，压缩；传 max_tf_norm 供 block max_score 存储
         std::vector<DocId> doc_ids = pl->docIds();
         std::vector<SkipNode> skip_nodes;
-        std::vector<uint8_t> compressed = PForDelta::compress(doc_ids, skip_nodes, idf);
+        std::vector<uint8_t> compressed = PForDelta::compress(doc_ids, skip_nodes, meta.upper_bound);
 
         // 构建并序列化 SkipList
         SkipList sl(skip_nodes);

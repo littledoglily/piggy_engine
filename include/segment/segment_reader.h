@@ -13,6 +13,7 @@
 #include "fastfield/fast_field_reader.h"
 #include <string>
 #include <map>
+#include <unordered_map>
 #include <vector>
 #include <fstream>
 #include <bitset>
@@ -66,8 +67,10 @@ public:
     const std::map<std::string, TermMeta>& termDict() const { return term_dict_; }
 
     // 计算 BM25 score（单 doc，多 term）
+    // term_idfs：由 IndexSearcher 基于全局统计预算的 {term -> global_idf}
     float bm25Score(DocId doc_id,
-                    const std::vector<std::string>& query_terms) const;
+                    const std::vector<std::string>& query_terms,
+                    const std::unordered_map<std::string, float>& term_idfs) const;
 
     // ── FastField 接口（数值列存）─────────────────────────────────────────────
     // 泛化访问：通过 FastFieldReader 泛化接口

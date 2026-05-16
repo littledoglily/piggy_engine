@@ -346,30 +346,30 @@ SegmentReader::StoredDocResult SegmentReader::readStoredDoc(DocId doc_id) const 
 
 float SegmentReader::bm25Score(
     DocId doc_id,
-    const std::vector<std::string>& query_terms) const
+    const std::vector<std::string>& query_terms,
+    const std::unordered_map<std::string, float>& term_idfs) const
 {
-    const float k1 = 1.2f, b = 0.75f;
+    const float k1 = 1.2f;
     float score = 0.0f;
 
     for (const auto& term : query_terms) {
         const TermMeta* meta = getTermMeta(term);
         if (!meta) continue;
 
-        // IDF
-        float idf = std::log(1.0f + (float)(doc_count_ - meta->doc_freq + 0.5f)
-                                  / (float)(meta->doc_freq + 0.5f));
+        auto idf_it = term_idfs.find(term);
+        if (idf_it == term_idfs.end()) continue;
+        float idf = idf_it->second;
 
-        // tf：需要读 posting list 找到该 doc 的 tf
-        // 简化：全量读 posting list 查找（生产应缓存）
+        // tf：全量读 posting list 查找该 doc（生产应缓存）
         auto pl = readPostingList(term);
         uint32_t tf = 0;
-        for (size_t i = 0; i < pl.size(); ++i) {
-            if (pl[i] == doc_id) { tf = 1; break; }  // 简化 tf=1
+        for (DocId d : pl) {
+            if (d == doc_id) { tf = 1; break; }  // 简化 tf=1
         }
         if (tf == 0) continue;
 
-        float tf_norm = (float)tf * (k1 + 1.0f)
-                      / ((float)tf + k1 * (1.0f - b + b));
+        // tf_norm：dl=avgdl 简化（k1=1.2）
+        float tf_norm = (float)tf * (k1 + 1.0f) / ((float)tf + k1);
         score += tf_norm * idf;
     }
     return score;

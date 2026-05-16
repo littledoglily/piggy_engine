@@ -53,6 +53,7 @@ void IndexWriter::addDocument(const Document& doc) {
 
     // ── 按 Schema 路由 ────────────────────────────────────────────────────────
     // 跨 Text 字段累积位置偏移，保证同一 doc 所有字段 token 位置单调递增
+    // TODO: 后续不同field的索引要带字段名, 主要针对text类型索引，后续想要只在TEXT字段检索不支持
     uint32_t field_pos_base = 0;
 
     for (const auto& fs : schema_.fields) {

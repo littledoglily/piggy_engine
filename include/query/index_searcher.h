@@ -12,6 +12,7 @@
 #include "segment/segment_reader.h"
 #include <vector>
 #include <string>
+#include <unordered_map>
 #include <memory>
 #include <queue>
 #include <numeric>
@@ -50,9 +51,15 @@ public:
     static void printResults(const std::vector<SearchResult>& results);
 
 private:
+    // 基于全局统计为每个 query term 计算 {term -> global_idf}
+    std::unordered_map<std::string, float> computeTermIdfs(
+        const std::vector<std::string>& terms
+    ) const;
+
     // AND 查询：Zigzag 双指针求交集，对交集计算 BM25
     std::vector<SearchResult> searchAND(
         const std::vector<std::string>& terms,
+        const std::unordered_map<std::string, float>& term_idfs,
         int top_k,
         const SegmentReader& seg,
         const NumericFilter* filter
@@ -61,6 +68,7 @@ private:
     // OR 查询：WAND 算法（上界剪枝，返回 TopK）
     std::vector<SearchResult> searchOR_WAND(
         const std::vector<std::string>& terms,
+        const std::unordered_map<std::string, float>& term_idfs,
         int top_k,
         const SegmentReader& seg,
         const NumericFilter* filter
@@ -87,6 +95,7 @@ private:
 
     Analyzer analyzer_;
     std::vector<std::unique_ptr<SegmentReader>> segments_;
+    uint32_t global_total_docs_ = 0;
 };
 
 } // namespace ii

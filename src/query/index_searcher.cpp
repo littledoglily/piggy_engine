@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 #include <stdexcept>
 
@@ -32,7 +33,39 @@ IndexSearcher::IndexSearcher(const std::string& dir) {
     for (uint32_t id : seg_ids) {
         segments_.push_back(std::make_unique<SegmentReader>(dir, id));
     }
-    std::cout << "[IndexSearcher] Loaded " << segments_.size() << " segment(s).\n";
+
+    for (const auto& seg : segments_) {
+        global_total_docs_ += seg->docCount();
+    }
+
+    std::cout << "[IndexSearcher] Loaded " << segments_.size()
+              << " segment(s), " << global_total_docs_ << " docs total.\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// computeTermIdfs：基于全局统计计算每个 query term 的 IDF
+// global_df = 各 segment 中 df 之和；global_idf 用标准 BM25 公式
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::unordered_map<std::string, float> IndexSearcher::computeTermIdfs(
+    const std::vector<std::string>& terms) const
+{
+    std::unordered_map<std::string, float> result;
+    for (const auto& term : terms) {
+        uint32_t global_df = 0;
+        for (const auto& seg : segments_) {
+            const TermMeta* m = seg->getTermMeta(term);
+            if (m) global_df += m->doc_freq;
+        }
+        if (global_df == 0) {
+            result[term] = 0.0f;
+            continue;
+        }
+        float N   = static_cast<float>(global_total_docs_);
+        float df  = static_cast<float>(global_df);
+        result[term] = std::log(1.0f + (N - df + 0.5f) / (df + 0.5f));
+    }
+    return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,13 +87,15 @@ std::vector<SearchResult> IndexSearcher::search(
     }
     std::cout << "] mode=" << (mode == QueryMode::AND ? "AND" : "OR") << "\n";
 
+    auto term_idfs = computeTermIdfs(terms);
+
     std::vector<std::vector<SearchResult>> per_seg;
     for (const auto& seg : segments_) {
         std::vector<SearchResult> seg_results;
         if (mode == QueryMode::AND) {
-            seg_results = searchAND(terms, top_k, *seg, nullptr);
+            seg_results = searchAND(terms, term_idfs, top_k, *seg, nullptr);
         } else {
-            seg_results = searchOR_WAND(terms, top_k, *seg, nullptr);
+            seg_results = searchOR_WAND(terms, term_idfs, top_k, *seg, nullptr);
         }
         per_seg.push_back(std::move(seg_results));
     }
@@ -85,13 +120,15 @@ std::vector<SearchResult> IndexSearcher::search(
     }
     std::cout << "] mode=" << (mode == QueryMode::AND ? "AND" : "OR") << "\n";
 
+    auto term_idfs = computeTermIdfs(terms);
+
     std::vector<std::vector<SearchResult>> per_seg;
     for (const auto& seg : segments_) {
         std::vector<SearchResult> seg_results;
         if (mode == QueryMode::AND) {
-            seg_results = searchAND(terms, top_k, *seg, &filter);
+            seg_results = searchAND(terms, term_idfs, top_k, *seg, &filter);
         } else {
-            seg_results = searchOR_WAND(terms, top_k, *seg, &filter);
+            seg_results = searchOR_WAND(terms, term_idfs, top_k, *seg, &filter);
         }
         per_seg.push_back(std::move(seg_results));
     }
@@ -135,6 +172,7 @@ bool IndexSearcher::passesFilter(const SegmentReader& seg,
 
 std::vector<SearchResult> IndexSearcher::searchAND(
     const std::vector<std::string>& terms,
+    const std::unordered_map<std::string, float>& term_idfs,
     int top_k,
     const SegmentReader& seg,
     const NumericFilter* filter) const
@@ -179,7 +217,7 @@ std::vector<SearchResult> IndexSearcher::searchAND(
     std::vector<SearchResult> results;
     results.reserve(intersection.size());
     for (DocId did : intersection) {
-        float score = seg.bm25Score(did, terms);
+        float score = seg.bm25Score(did, terms, term_idfs);
         auto stored = seg.readStoredDoc(did);
         SearchResult r;
         r.doc_id  = did;
@@ -213,6 +251,7 @@ std::vector<SearchResult> IndexSearcher::searchAND(
 
 std::vector<SearchResult> IndexSearcher::searchOR_WAND(
     const std::vector<std::string>& terms,
+    const std::unordered_map<std::string, float>& term_idfs,
     int top_k,
     const SegmentReader& seg,
     const NumericFilter* filter) const
@@ -231,11 +270,13 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
     for (const auto& t : terms) {
         const TermMeta* meta = seg.getTermMeta(t);
         if (!meta) continue;
+        auto idf_it = term_idfs.find(t);
+        float idf = (idf_it != term_idfs.end()) ? idf_it->second : 0.0f;
         TermCursor c;
         c.term = t;
         c.docs = seg.readPostingList(t);
         c.ptr  = 0;
-        c.ub   = meta->upper_bound;
+        c.ub   = meta->upper_bound * idf;  // max_tf_norm × global_idf = 真正 UB
         if (!c.docs.empty()) cursors.push_back(std::move(c));
     }
     if (cursors.empty()) return {};
@@ -271,7 +312,7 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
         if (min_doc == pivot_doc) {
             if (seg.isAlive(pivot_doc) &&
                 (!filter || passesFilter(seg, pivot_doc, *filter))) {
-                float score = seg.bm25Score(pivot_doc, terms);
+                float score = seg.bm25Score(pivot_doc, terms, term_idfs);
                 if ((int)heap.size() < top_k || score > heap.top().score) {
                     if ((int)heap.size() == top_k) heap.pop();
                     heap.push({score, pivot_doc});

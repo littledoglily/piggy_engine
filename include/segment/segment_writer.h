@@ -53,12 +53,10 @@ public:
 private:
     // ── 写各个文件 ───────────────────────────────────────────────────────────
     void writeTim(const InMemoryIndex& idx,
-                  std::map<std::string, TermMeta>& term_dict_out,
-                  uint32_t total_docs, float avg_doc_len);
+                  std::map<std::string, TermMeta>& term_dict_out);
 
     void writeDoc(const InMemoryIndex& idx,
-                  std::map<std::string, TermMeta>& term_dict,
-                  float avg_doc_len, uint32_t total_docs);
+                  std::map<std::string, TermMeta>& term_dict);
 
     void writePos(const InMemoryIndex& idx,
                   std::map<std::string, TermMeta>& term_dict);
@@ -72,12 +70,8 @@ private:
 
     void writeSi(const SegmentInfo& info);
 
-    // 计算 BM25 IDF（简化）
-    static float calcIdf(uint32_t df, uint32_t total_docs);
-
-    // 计算 term 的 UB（Upper Bound）
-    static float calcUB(const PostingList& pl,
-                        float idf, float avg_doc_len);
+    // 计算 term 的 max_tf_norm（不含 IDF，查询期乘以 global_idf 得真正 UB）
+    static float calcMaxTfNorm(const PostingList& pl);
 
     // 文件路径辅助
     std::string path(const std::string& ext) const;

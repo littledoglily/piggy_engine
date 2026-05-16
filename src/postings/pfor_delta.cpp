@@ -87,7 +87,7 @@ uint8_t PForDelta::chooseBitWidth(const std::vector<uint32_t>& deltas) {
 std::vector<uint8_t> PForDelta::compress(
     const std::vector<DocId>& doc_ids,
     std::vector<SkipNode>&    skip_nodes_out,
-    float                     global_idf)
+    float                     max_tf_norm)
 {
     std::vector<uint8_t> output;
     skip_nodes_out.clear();
@@ -135,9 +135,8 @@ std::vector<uint8_t> PForDelta::compress(
         hdr.reserved    = 0;
         hdr.max_doc_id  = block_docs.back();
         hdr.first_doc_id= block_docs.front();
-        // max_score：简化为 tf_norm_max × idf
-        //   tf_norm_max = 1/(1+1.2) ≈ 0.45（假设最大 tf=1）
-        hdr.max_score   = 0.45f * global_idf;
+        // max_score 存 max_tf_norm（不含 IDF），查询期 × global_idf 得 block UB
+        hdr.max_score   = max_tf_norm;
 
         // Step5：写 Header
         size_t block_start_offset = output.size();
