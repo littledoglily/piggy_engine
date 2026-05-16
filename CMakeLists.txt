@@ -39,5 +39,20 @@ target_link_libraries(demo inverted_index_lib)
 add_executable(test_all tests/test_all.cpp)
 target_link_libraries(test_all inverted_index_lib)
 
+add_executable(test_analyzer     tests/tokenizer/test_analyzer.cpp)
+target_link_libraries(test_analyzer inverted_index_lib)
+
+add_executable(test_pfor_delta   tests/postings/test_pfor_delta.cpp)
+target_link_libraries(test_pfor_delta inverted_index_lib)
+
+add_executable(test_skiplist     tests/postings/test_skiplist.cpp)
+target_link_libraries(test_skiplist inverted_index_lib)
+
+add_executable(test_posting_list tests/postings/test_posting_list.cpp)
+target_link_libraries(test_posting_list inverted_index_lib)
+
+add_executable(test_merger       tests/segment/test_merger.cpp)
+target_link_libraries(test_merger inverted_index_lib)
+
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")
