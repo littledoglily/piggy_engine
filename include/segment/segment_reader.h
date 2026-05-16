@@ -60,6 +60,9 @@ public:
     uint32_t termCount() const { return term_dict_.size(); }
     uint32_t segmentId() const { return seg_id_; }
 
+    // 暴露词典（工具/调试用）
+    const std::map<std::string, TermMeta>& termDict() const { return term_dict_; }
+
     // 计算 BM25 score（单 doc，多 term）
     float bm25Score(DocId doc_id,
                     const std::vector<std::string>& query_terms) const;

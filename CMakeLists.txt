@@ -59,5 +59,11 @@ target_link_libraries(test_merger inverted_index_lib)
 add_executable(test_fast_field   tests/fastfield/test_fast_field.cpp)
 target_link_libraries(test_fast_field inverted_index_lib)
 
+add_executable(wiki_indexer      tools/wiki_indexer.cpp)
+target_link_libraries(wiki_indexer inverted_index_lib)
+
+add_executable(wiki_searcher     tools/wiki_searcher.cpp)
+target_link_libraries(wiki_searcher inverted_index_lib)
+
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")
