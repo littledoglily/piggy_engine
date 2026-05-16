@@ -144,7 +144,7 @@ void SegmentWriter::writeTim(
     for (const auto& term : terms) {
         const PostingList* pl = idx.getPostingList(term);
         if (!pl) continue;
-
+        // FIX: 离线计算IDF和UB的值是有问题，因为离线构建的时候segment中拿到的total doc是局部的；应该在线请求的时候先收集全局的doc数量，再检索的时候分发给每个segment进行实时计算
         float idf = calcIdf(pl->size(), total_docs);
         float ub  = calcUB(*pl, idf, avg_doc_len);
 
