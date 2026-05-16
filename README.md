@@ -5,31 +5,48 @@
 ## 工程结构
 
 ```
-inverted_index/
+piggy_engine/
 ├── CMakeLists.txt
 ├── README.md
-├── include/                   ← 所有头文件
-│   ├── types.h                基础类型（DocId、Token、TermMeta 等）
-│   ├── analyzer.h             文本分析管道（CharFilter→Tokenizer→Stem）
-│   ├── pfor_delta.h           PForDelta 压缩 / 解压
-│   ├── skiplist.h             Block 级跳表（Level0 + Level1）
-│   ├── posting_list.h         内存倒排链
-│   ├── segment_writer.h       Flush → Segment 文件
-│   ├── segment_reader.h       只读打开 Segment
-│   ├── index_writer.h         文档写入入口
-│   └── index_searcher.h       AND（Zigzag）/ OR（WAND）查询
-├── src/                       ← 实现文件
-│   ├── analyzer.cpp
-│   ├── pfor_delta.cpp
-│   ├── skiplist.cpp
-│   ├── posting_list.cpp
-│   ├── segment_writer.cpp
-│   ├── segment_reader.cpp
-│   ├── index_writer.cpp
-│   ├── index_searcher.cpp
-│   └── main.cpp               256 篇文档 Demo
+├── include/                        ← 所有头文件（按模块分目录）
+│   ├── types.h                     基础类型（DocId、Token、TermMeta 等）
+│   ├── core/
+│   │   └── index_writer.h          文档写入入口
+│   ├── query/
+│   │   └── index_searcher.h        AND（Zigzag）/ OR（WAND）查询
+│   ├── postings/
+│   │   ├── pfor_delta.h            PForDelta 压缩 / 解压
+│   │   ├── skiplist.h              Block 级跳表（Level0 + Level1）
+│   │   └── posting_list.h          内存倒排链
+│   ├── segment/
+│   │   ├── segment_writer.h        Flush → Segment 文件
+│   │   ├── segment_reader.h        只读打开 Segment
+│   │   └── segment_merger.h        Segment 合并 + 软删除
+│   ├── tokenizer/
+│   │   └── analyzer.h              文本分析管道（CharFilter→Tokenizer→Stem）
+│   ├── fastfield/                  （预留）列存 / 属性字段
+│   ├── store/                      （预留）原文存储压缩
+│   ├── collector/                  （预留）结果收集器
+│   ├── positions/                  （预留）位置信息
+│   └── query-grammar/              （预留）自定义查询 DSL
+├── src/                            ← 实现文件（与 include/ 同结构）
+│   ├── core/
+│   │   ├── index_writer.cpp
+│   │   └── main.cpp                256 篇文档 Demo
+│   ├── query/
+│   │   └── index_searcher.cpp
+│   ├── postings/
+│   │   ├── pfor_delta.cpp
+│   │   ├── skiplist.cpp
+│   │   └── posting_list.cpp
+│   ├── segment/
+│   │   ├── segment_writer.cpp
+│   │   ├── segment_reader.cpp
+│   │   └── segment_merger.cpp
+│   └── tokenizer/
+│       └── analyzer.cpp
 └── tests/
-    └── test_all.cpp           单元测试（无第三方依赖）
+    └── test_all.cpp                单元测试（无第三方依赖）
 ```
 
 ## 核心模块说明
@@ -47,17 +64,36 @@ inverted_index/
 
 ## 编译运行
 
+在**项目根目录**执行以下命令：
+
 ```bash
-# 编译
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j4
+# 第一步：生成构建系统（只需执行一次，或 CMakeLists.txt 变更后重新执行）
+# -S .              源码目录为当前目录
+# -B build          构建产物输出到 build/，不污染源码目录
+# -DCMAKE_BUILD_TYPE=Release  开启 -O2 优化
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+# 第二步：编译（-j4 表示使用 4 个并行线程）
+cmake --build build -j4
 
 # 运行 Demo（写入 256 篇文档 + 搜索）
-./demo
+./build/demo
 
 # 运行单元测试
-./test_all
+./build/test_all
+```
+
+调试模式（带调试符号，关闭优化）：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j4
+```
+
+后续只改代码，无需重新 cmake，直接：
+
+```bash
+cmake --build build -j4
 ```
 
 ## 生成的 Segment 文件
