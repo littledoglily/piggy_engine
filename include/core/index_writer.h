@@ -9,9 +9,9 @@
 //   4. 维护全局 doc_count 和 avg_doc_len
 // ─────────────────────────────────────────────────────────────────────────────
 #include "types.h"
-#include "analyzer.h"
-#include "posting_list.h"
-#include "segment_writer.h"
+#include "tokenizer/analyzer.h"
+#include "postings/posting_list.h"
+#include "segment/segment_writer.h"
 #include <string>
 #include <vector>
 #include <memory>

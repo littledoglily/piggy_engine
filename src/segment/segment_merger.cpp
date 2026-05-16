@@ -1,7 +1,7 @@
-#include "segment_merger.h"
+#include "segment/segment_merger.h"
 #include <cmath>
-#include "pfor_delta.h"
-#include "skiplist.h"
+#include "postings/pfor_delta.h"
+#include "postings/skiplist.h"
 #include <algorithm>
 #include <cassert>
 #include <cstring>

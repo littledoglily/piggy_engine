@@ -1,4 +1,4 @@
-#include "skiplist.h"
+#include "postings/skiplist.h"
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>

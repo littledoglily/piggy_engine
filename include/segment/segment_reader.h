@@ -9,7 +9,7 @@
 //   .liv  → 启动时读入 bitset（模拟常驻内存）
 // ─────────────────────────────────────────────────────────────────────────────
 #include "types.h"
-#include "skiplist.h"
+#include "postings/skiplist.h"
 #include <string>
 #include <map>
 #include <vector>

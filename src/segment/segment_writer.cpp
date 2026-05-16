@@ -1,6 +1,6 @@
-#include "segment_writer.h"
-#include "pfor_delta.h"
-#include "skiplist.h"
+#include "segment/segment_writer.h"
+#include "postings/pfor_delta.h"
+#include "postings/skiplist.h"
 #include <fstream>
 #include <cstring>
 #include <cmath>

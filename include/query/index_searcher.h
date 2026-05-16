@@ -8,8 +8,8 @@
 //   跨多个 Segment 搜索，结果归并
 // ─────────────────────────────────────────────────────────────────────────────
 #include "types.h"
-#include "analyzer.h"
-#include "segment_reader.h"
+#include "tokenizer/analyzer.h"
+#include "segment/segment_reader.h"
 #include <vector>
 #include <string>
 #include <memory>

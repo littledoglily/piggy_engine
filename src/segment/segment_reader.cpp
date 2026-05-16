@@ -1,5 +1,5 @@
-#include "segment_reader.h"
-#include "pfor_delta.h"
+#include "segment/segment_reader.h"
+#include "postings/pfor_delta.h"
 #include <cstring>
 #include <cmath>
 #include <stdexcept>

@@ -1,4 +1,4 @@
-#include "posting_list.h"
+#include "postings/posting_list.h"
 #include <algorithm>
 #include <stdexcept>
 

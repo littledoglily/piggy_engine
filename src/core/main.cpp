@@ -8,11 +8,11 @@
 //   4. IndexSearcher 打开索引，执行 AND / OR 查询
 //   5. 打印结果
 // ─────────────────────────────────────────────────────────────────────────────
-#include "index_writer.h"
-#include "segment_merger.h"
-#include "index_searcher.h"
-#include "pfor_delta.h"
-#include "skiplist.h"
+#include "core/index_writer.h"
+#include "segment/segment_merger.h"
+#include "query/index_searcher.h"
+#include "postings/pfor_delta.h"
+#include "postings/skiplist.h"
 #include <iostream>
 #include <vector>
 #include <string>

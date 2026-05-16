@@ -24,8 +24,8 @@
 //   - 合并时自动跳过已删除 doc
 // ─────────────────────────────────────────────────────────────────────────────
 #include "types.h"
-#include "segment_reader.h"
-#include "segment_writer.h"
+#include "segment/segment_reader.h"
+#include "segment/segment_writer.h"
 #include <string>
 #include <vector>
 #include <memory>

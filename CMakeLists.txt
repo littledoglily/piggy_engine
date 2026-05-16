@@ -17,22 +17,22 @@ include_directories(include)
 
 # ── library sources ──────────────────────────────────────────────
 set(LIB_SOURCES
-    src/analyzer.cpp
-    src/pfor_delta.cpp
-    src/skiplist.cpp
-    src/posting_list.cpp
-    src/segment_writer.cpp
-    src/segment_reader.cpp
-    src/segment_merger.cpp
-    src/index_writer.cpp
-    src/index_searcher.cpp
+    src/tokenizer/analyzer.cpp
+    src/postings/pfor_delta.cpp
+    src/postings/skiplist.cpp
+    src/postings/posting_list.cpp
+    src/segment/segment_writer.cpp
+    src/segment/segment_reader.cpp
+    src/segment/segment_merger.cpp
+    src/core/index_writer.cpp
+    src/query/index_searcher.cpp
 )
 
 add_library(inverted_index_lib STATIC ${LIB_SOURCES})
 target_include_directories(inverted_index_lib PUBLIC include)
 
 # ── main demo ────────────────────────────────────────────────────
-add_executable(demo src/main.cpp)
+add_executable(demo src/core/main.cpp)
 target_link_libraries(demo inverted_index_lib)
 
 # ── unit tests ───────────────────────────────────────────────────
