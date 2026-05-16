@@ -147,8 +147,10 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
     // 格式：seg_id × old_local_doc_id → new_global_doc_id
     // 重映射去掉被软删除的 doc，重新从 1 连续编号
     struct GlobalDoc {
-        uint32_t seg_id;
-        DocId    orig_doc_id;   // .fdt 中存储的原始 doc_id
+        uint32_t    seg_id;
+        DocId       orig_doc_id;
+        uint64_t    ext_id = 0;
+        std::string source;
         std::string title, body, category;
     };
     std::vector<GlobalDoc> alive_docs;
@@ -184,9 +186,11 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
             GlobalDoc gd;
             gd.seg_id      = sid;
             gd.orig_doc_id = stored.doc_id;
-            gd.title        = stored.title;
-            gd.body         = stored.body;
-            gd.category     = stored.category;
+            gd.ext_id      = stored.ext_id;
+            gd.source      = stored.source;
+            gd.title       = stored.title;
+            gd.body        = stored.body;
+            gd.category    = stored.category;
             alive_docs.push_back(std::move(gd));
             ++new_id;
         }
@@ -354,6 +358,8 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
             fdx_offsets.push_back((uint64_t)ffdt.tellp());
             DocId new_doc_id = remap[((uint64_t)gd.seg_id << 20) | gd.orig_doc_id];
             wU32(ffdt, new_doc_id);
+            wU64(ffdt, gd.ext_id);
+            wStr(ffdt, gd.source);
             wStr(ffdt, gd.title);
             wStr(ffdt, gd.body);
             wStr(ffdt, gd.category);

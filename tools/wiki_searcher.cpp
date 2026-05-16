@@ -72,27 +72,31 @@ static void printResults(const std::string& query,
         return;
     }
 
-    std::cout << std::string(72, '-') << "\n";
+    std::cout << std::string(90, '-') << "\n";
     std::cout << std::left
               << std::setw(5)  << "Rank"
-              << std::setw(10) << "DocID"
+              << std::setw(8)  << "DocID"
+              << std::setw(12) << "WikiID"
               << std::setw(9)  << "Score"
-              << "Title (Wiki Article)\n";
-    std::cout << std::string(72, '-') << "\n";
+              << "Title  |  Source\n";
+    std::cout << std::string(90, '-') << "\n";
 
     for (size_t i = 0; i < results.size(); ++i) {
         const auto& r = results[i];
 
-        // 截断过长标题（防止换行破坏对齐）
         std::string title = r.title;
-        if (title.size() > 48) title = title.substr(0, 45) + "...";
+        if (title.size() > 30) title = title.substr(0, 27) + "...";
+
+        std::string source = r.source;
+        if (source.size() > 50) source = source.substr(0, 47) + "...";
 
         std::cout << std::left
                   << std::setw(5)  << (i + 1)
-                  << std::setw(10) << r.doc_id
+                  << std::setw(8)  << r.doc_id
+                  << std::setw(12) << r.ext_id
                   << std::fixed << std::setprecision(4)
                   << std::setw(9)  << r.score
-                  << title << "\n";
+                  << title << "  |  " << source << "\n";
     }
     std::cout << "\n";
 }

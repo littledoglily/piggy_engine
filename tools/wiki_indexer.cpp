@@ -74,10 +74,10 @@ static std::string extractJsonString(const std::string& line,
     return result;
 }
 
-static uint32_t extractJsonId(const std::string& line) {
+static uint64_t extractJsonId(const std::string& line) {
     std::string val = extractJsonString(line, "id");
     if (val.empty()) return 0;
-    try { return static_cast<uint32_t>(std::stoul(val)); }
+    try { return std::stoull(val); }
     catch (...) { return 0; }
 }
 
@@ -162,13 +162,11 @@ static uint64_t buildIndex(const Args& args) {
             std::string text = extractJsonString(line, "text");
             if (text.empty()) { ++skip_count; continue; }
 
-            uint32_t id    = extractJsonId(line);
-            std::string title = extractJsonString(line, "title");
-            if (id == 0) id = static_cast<uint32_t>(doc_count + 1);
-
             ii::Document doc;
             doc.doc_id = static_cast<ii::DocId>(doc_count + 1);  // 1-indexed
-            doc.title  = std::move(title);
+            doc.ext_id = extractJsonId(line);                     // wiki numeric id
+            doc.source = extractJsonString(line, "url");          // wiki URL
+            doc.title  = extractJsonString(line, "title");
             doc.body   = std::move(text);
 
             writer.addDocument(doc);

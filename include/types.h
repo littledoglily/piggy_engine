@@ -54,10 +54,17 @@ struct TermMeta {
 
 // ── Document：写入索引的原始文档 ────────────────────────────────────────────
 struct Document {
-    DocId       doc_id;
+    // ── 标识符 ───────────────────────────────────────────────────────────────
+    DocId       doc_id   = 0;     // 引擎内部顺序 ID（Segment 局部，1-indexed）
+    uint64_t    ext_id   = 0;     // 外部数字 ID（wiki page id / ISBN number / URL hash 等）
+    std::string source;           // 外部字符串标识（URL / DOI / ISBN / 文件路径等）
+
+    // ── 正文字段 ─────────────────────────────────────────────────────────────
     std::string title;
     std::string body;
     std::string category;
+
+    // ── 数值字段（FastField）─────────────────────────────────────────────────
     float       page_rank = 0.0f;
     int64_t     pubtime   = 0;    // Unix 时间戳，用于范围过滤 + 排序
     int64_t     uid       = 0;    // 用户 ID，用于等值过滤
@@ -86,9 +93,11 @@ struct NumericFilter {
 
 // ── SearchResult：单条搜索结果 ───────────────────────────────────────────────
 struct SearchResult {
-    DocId       doc_id;
-    float       score;
-    std::string title;   // 从 .fdt 取回的原文字段
+    DocId       doc_id  = 0;
+    float       score   = 0.0f;
+    uint64_t    ext_id  = 0;     // 外部数字 ID（原样从 .fdt 取回）
+    std::string source;          // 外部字符串标识（URL 等，从 .fdt 取回）
+    std::string title;
     int64_t     pubtime = 0;
     int64_t     uid     = 0;
 };

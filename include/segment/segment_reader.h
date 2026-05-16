@@ -50,6 +50,8 @@ public:
     // 从 .fdt 按 doc_id 读取原文（返回 StoredDoc）
     struct StoredDocResult {
         DocId       doc_id = 0;
+        uint64_t    ext_id = 0;
+        std::string source;
         std::string title;
         std::string body;
         std::string category;

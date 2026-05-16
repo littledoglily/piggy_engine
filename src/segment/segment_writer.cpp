@@ -317,7 +317,9 @@ void SegmentWriter::writePos(
 // writeFdt：文档原文
 //
 // 格式（每篇文档）：
-//   4B  doc_id
+//   4B  doc_id (uint32)
+//   8B  ext_id (uint64)   外部数字 ID
+//   [str] source          外部字符串标识
 //   [str] title
 //   [str] body
 //   [str] category
@@ -334,6 +336,8 @@ void SegmentWriter::writeFdt(
     for (size_t i = 0; i < docs.size(); ++i) {
         offsets_out[i] = static_cast<uint64_t>(f.tellp());
         writeU32(f, docs[i].doc_id);
+        writeU64(f, docs[i].ext_id);
+        writeStr(f, docs[i].source);
         writeStr(f, docs[i].title);
         writeStr(f, docs[i].body);
         writeStr(f, docs[i].category);

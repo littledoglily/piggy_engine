@@ -319,6 +319,10 @@ SegmentReader::StoredDocResult SegmentReader::readStoredDoc(DocId doc_id) const 
     fdt_file_.read(reinterpret_cast<char*>(&did), 4);
     r.doc_id = did;
 
+    uint64_t eid = 0;
+    fdt_file_.read(reinterpret_cast<char*>(&eid), 8);
+    r.ext_id = eid;
+
     auto readStr = [&]() -> std::string {
         uint32_t len = 0;
         fdt_file_.read(reinterpret_cast<char*>(&len), 4);
@@ -327,6 +331,7 @@ SegmentReader::StoredDocResult SegmentReader::readStoredDoc(DocId doc_id) const 
         return s;
     };
 
+    r.source   = readStr();
     r.title    = readStr();
     r.body     = readStr();
     r.category = readStr();

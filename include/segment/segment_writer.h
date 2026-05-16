@@ -30,7 +30,9 @@ struct SegmentInfo {
 
 // ── 文档存储条目（写入 .fdt/.fdx）────────────────────────────────────────────
 struct StoredDoc {
-    DocId       doc_id;
+    DocId       doc_id  = 0;
+    uint64_t    ext_id  = 0;     // 外部数字 ID
+    std::string source;          // 外部字符串标识（URL / ISBN / 路径等）
     std::string title;
     std::string body;
     std::string category;

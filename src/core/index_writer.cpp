@@ -42,6 +42,8 @@ void IndexWriter::addDocument(const Document& doc) {
     // 3. 暂存原文
     StoredDoc sd;
     sd.doc_id   = doc.doc_id;
+    sd.ext_id   = doc.ext_id;
+    sd.source   = doc.source;
     sd.title    = doc.title;
     sd.body     = doc.body;
     sd.category = doc.category;
