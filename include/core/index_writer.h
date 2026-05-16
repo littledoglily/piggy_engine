@@ -12,6 +12,7 @@
 #include "tokenizer/analyzer.h"
 #include "postings/posting_list.h"
 #include "segment/segment_writer.h"
+#include "fastfield/fast_field_writer.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -49,7 +50,8 @@ private:
     Analyzer      analyzer_;
     InMemoryIndex mem_index_;
 
-    std::vector<StoredDoc> stored_docs_buf_;  // 待 flush 的原文
+    std::vector<StoredDoc>    stored_docs_buf_;  // 待 flush 的原文
+    std::vector<FastFieldDoc> ff_buf_;           // 待 flush 的数值列
     uint32_t               total_docs_   = 0;
     uint32_t               next_seg_id_  = 0;
     uint64_t               total_tokens_ = 0;  // 用于计算 avg_doc_len

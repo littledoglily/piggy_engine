@@ -1,4 +1,5 @@
 #include "segment/segment_merger.h"
+#include "fastfield/fast_field_writer.h"
 #include <cmath>
 #include "postings/pfor_delta.h"
 #include "postings/skiplist.h"
@@ -391,7 +392,27 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         wStr(fsi, ts);
     }
 
-    // ── Step8: 原子更新 segments_N 注册表 ────────────────────────────────────
+    // ── Step8: 重建 FastField 列存（_N.ff_pubtime / ff_uid / ff_page_rank）────
+    {
+        FastFieldWriter ff_writer;
+        for (const auto& gd : alive_docs) {
+            SegmentReader* reader = nullptr;
+            for (auto& r : readers_) {
+                if (r->segmentId() == gd.seg_id) { reader = r.get(); break; }
+            }
+            FastFieldDoc ffd;
+            if (reader && reader->hasFastField()) {
+                uint32_t idx = gd.orig_doc_id - 1;  // 0-indexed
+                ffd.pubtime   = reader->ffPubtime(idx);
+                ffd.uid       = reader->ffUid(idx);
+                ffd.page_rank = reader->ffPageRank(idx);
+            }
+            ff_writer.add(ffd);
+        }
+        ff_writer.flush(dir_, new_segment_id);
+    }
+
+    // ── Step9: 原子更新 segments_N 注册表 ────────────────────────────────────
     // 找当前最大 generation
     uint32_t max_gen = new_segment_id;
     writeSegmentsFile({new_segment_id}, max_gen + 1);
@@ -437,7 +458,8 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
 // ─────────────────────────────────────────────────────────────────────────────
 
 void SegmentMerger::deleteSegmentFiles(uint32_t seg_id) {
-    for (const auto& ext : {"si","tim","doc","pos","fdt","fdx","liv","pay","nvm","nvd"}) {
+    for (const auto& ext : {"si","tim","doc","pos","fdt","fdx","liv",
+                             "ff_pubtime","ff_uid","ff_page_rank","pay","nvm","nvd"}) {
         std::error_code ec;
         auto p = segPath(seg_id, ext);
         if (std::filesystem::exists(p, ec)) {

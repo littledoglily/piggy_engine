@@ -44,7 +44,6 @@ std::vector<SearchResult> IndexSearcher::search(
     int                top_k,
     QueryMode          mode) const
 {
-    // 分析查询词
     std::vector<std::string> terms = analyzer_.analyzeQuery(query);
     if (terms.empty()) return {};
 
@@ -55,19 +54,79 @@ std::vector<SearchResult> IndexSearcher::search(
     }
     std::cout << "] mode=" << (mode == QueryMode::AND ? "AND" : "OR") << "\n";
 
-    // 对每个 Segment 独立搜索
     std::vector<std::vector<SearchResult>> per_seg;
     for (const auto& seg : segments_) {
         std::vector<SearchResult> seg_results;
         if (mode == QueryMode::AND) {
-            seg_results = searchAND(terms, top_k, *seg);
+            seg_results = searchAND(terms, top_k, *seg, nullptr);
         } else {
-            seg_results = searchOR_WAND(terms, top_k, *seg);
+            seg_results = searchOR_WAND(terms, top_k, *seg, nullptr);
         }
         per_seg.push_back(std::move(seg_results));
     }
 
     return mergeTopK(per_seg, top_k);
+}
+
+// 带数值过滤的重载
+std::vector<SearchResult> IndexSearcher::search(
+    const std::string&   query,
+    const NumericFilter& filter,
+    int                  top_k,
+    QueryMode            mode) const
+{
+    std::vector<std::string> terms = analyzer_.analyzeQuery(query);
+    if (terms.empty()) return {};
+
+    std::cout << "[Search+Filter] Query terms: [";
+    for (size_t i = 0; i < terms.size(); ++i) {
+        std::cout << terms[i];
+        if (i + 1 < terms.size()) std::cout << ", ";
+    }
+    std::cout << "] mode=" << (mode == QueryMode::AND ? "AND" : "OR") << "\n";
+
+    std::vector<std::vector<SearchResult>> per_seg;
+    for (const auto& seg : segments_) {
+        std::vector<SearchResult> seg_results;
+        if (mode == QueryMode::AND) {
+            seg_results = searchAND(terms, top_k, *seg, &filter);
+        } else {
+            seg_results = searchOR_WAND(terms, top_k, *seg, &filter);
+        }
+        per_seg.push_back(std::move(seg_results));
+    }
+
+    auto results = mergeTopK(per_seg, top_k);
+
+    // 如果需要按 pubtime 排序（postfilter sort）
+    if (filter.sort_by_pubtime) {
+        std::stable_sort(results.begin(), results.end(),
+            [](const SearchResult& a, const SearchResult& b) {
+                return a.pubtime > b.pubtime;
+            });
+    }
+    return results;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// passesFilter：检查单个 doc 是否通过数值过滤（in-filter，O(1) 查列存）
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool IndexSearcher::passesFilter(const SegmentReader& seg,
+                                  DocId doc_id,
+                                  const NumericFilter& filter) const
+{
+    // local_doc_idx = doc_id - 1（doc_id 从 1 开始）
+    uint32_t idx = static_cast<uint32_t>(doc_id) - 1;
+
+    if (filter.hasPubtimeRange()) {
+        int64_t pt = seg.ffPubtime(idx);
+        if (pt < filter.pubtime_lo || pt > filter.pubtime_hi) return false;
+    }
+    if (filter.hasUidFilter()) {
+        if (seg.ffUid(idx) != filter.uid) return false;
+    }
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -77,16 +136,15 @@ std::vector<SearchResult> IndexSearcher::search(
 std::vector<SearchResult> IndexSearcher::searchAND(
     const std::vector<std::string>& terms,
     int top_k,
-    const SegmentReader& seg) const
+    const SegmentReader& seg,
+    const NumericFilter* filter) const
 {
     if (terms.empty()) return {};
 
-    // 检查所有 term 是否在该 Segment 中存在
     for (const auto& t : terms) {
         if (!seg.getTermMeta(t)) return {};
     }
 
-    // 读取所有 term 的 posting list（升序 doc_id）
     std::vector<std::vector<DocId>> lists;
     lists.reserve(terms.size());
     for (const auto& t : terms) {
@@ -94,23 +152,21 @@ std::vector<SearchResult> IndexSearcher::searchAND(
         if (lists.back().empty()) return {};
     }
 
-    // 按 posting list 长度升序排列（最短的作为驱动）
     std::vector<size_t> order(lists.size());
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
         return lists[a].size() < lists[b].size();
     });
 
-    // Zigzag 交集：以最短 list 为驱动
     std::vector<DocId> intersection;
     const auto& driver = lists[order[0]];
 
     for (DocId candidate : driver) {
         if (!seg.isAlive(candidate)) continue;
+        if (filter && !passesFilter(seg, candidate, *filter)) continue;
         bool in_all = true;
         for (size_t i = 1; i < order.size(); ++i) {
             const auto& lst = lists[order[i]];
-            // 二分查找 candidate 是否在 lst 中
             auto it = std::lower_bound(lst.begin(), lst.end(), candidate);
             if (it == lst.end() || *it != candidate) {
                 in_all = false;
@@ -120,20 +176,20 @@ std::vector<SearchResult> IndexSearcher::searchAND(
         if (in_all) intersection.push_back(candidate);
     }
 
-    // 对交集中每个 doc 计算 BM25
     std::vector<SearchResult> results;
     results.reserve(intersection.size());
     for (DocId did : intersection) {
         float score = seg.bm25Score(did, terms);
         auto stored = seg.readStoredDoc(did);
         SearchResult r;
-        r.doc_id = did;
-        r.score  = score;
-        r.title  = stored.title;
+        r.doc_id  = did;
+        r.score   = score;
+        r.title   = stored.title;
+        r.pubtime = seg.ffPubtime(static_cast<uint32_t>(did) - 1);
+        r.uid     = seg.ffUid(static_cast<uint32_t>(did) - 1);
         results.push_back(r);
     }
 
-    // 按分数排序，取 top_k
     std::sort(results.begin(), results.end(), [](const SearchResult& a, const SearchResult& b) {
         return a.score > b.score;
     });
@@ -156,14 +212,14 @@ std::vector<SearchResult> IndexSearcher::searchAND(
 std::vector<SearchResult> IndexSearcher::searchOR_WAND(
     const std::vector<std::string>& terms,
     int top_k,
-    const SegmentReader& seg) const
+    const SegmentReader& seg,
+    const NumericFilter* filter) const
 {
-    // 过滤在该 Segment 中不存在的 term
     struct TermCursor {
         std::string         term;
         std::vector<DocId>  docs;
-        size_t              ptr;   // 当前位置
-        float               ub;    // Upper Bound
+        size_t              ptr;
+        float               ub;
         DocId curDoc() const {
             return ptr < docs.size() ? docs[ptr] : INVALID_DOC;
         }
@@ -182,70 +238,54 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
     }
     if (cursors.empty()) return {};
 
-    // MinHeap（分数最小的在堆顶）
-    MinHeap heap;  // 保存 TopK 候选（最小堆）
-    float theta = 0.0f;  // 堆中最小分数
+    MinHeap heap;
+    float theta = 0.0f;
 
-    // WAND 主循环
     bool changed = true;
     while (changed) {
         changed = false;
 
-        // Step1：按当前 doc_id 升序排序 cursors
         std::sort(cursors.begin(), cursors.end(), [](const TermCursor& a, const TermCursor& b) {
             return a.curDoc() < b.curDoc();
         });
 
-        // 去掉已到末尾的 cursor
         while (!cursors.empty() && cursors.back().curDoc() == INVALID_DOC)
             cursors.pop_back();
         if (cursors.empty()) break;
 
-        // Step2：找 pivot（从左累加 UB >= theta 的第一个 term）
         float ub_sum = 0.0f;
-        size_t pivot_idx = cursors.size();  // 默认找不到
+        size_t pivot_idx = cursors.size();
         for (size_t i = 0; i < cursors.size(); ++i) {
             ub_sum += cursors[i].ub;
-            if (ub_sum >= theta) {
-                pivot_idx = i;
-                break;
-            }
+            if (ub_sum >= theta) { pivot_idx = i; break; }
         }
-        if (pivot_idx == cursors.size()) break;  // 所有 UB 之和 < theta，终止
+        if (pivot_idx == cursors.size()) break;
 
         DocId pivot_doc = cursors[pivot_idx].curDoc();
         if (pivot_doc == INVALID_DOC) break;
 
-        // Step3：判断最小 doc_id 是否等于 pivot_doc
         DocId min_doc = cursors[0].curDoc();
 
         if (min_doc == pivot_doc) {
-            // 精确计算 pivot_doc 的分数
-            if (seg.isAlive(pivot_doc)) {
+            if (seg.isAlive(pivot_doc) &&
+                (!filter || passesFilter(seg, pivot_doc, *filter))) {
                 float score = seg.bm25Score(pivot_doc, terms);
-
                 if ((int)heap.size() < top_k || score > heap.top().score) {
                     if ((int)heap.size() == top_k) heap.pop();
                     heap.push({score, pivot_doc});
-                    if ((int)heap.size() == top_k) {
-                        theta = heap.top().score;
-                    }
+                    if ((int)heap.size() == top_k) theta = heap.top().score;
                 }
             }
-            // 推进所有指向 pivot_doc 的 cursor
             for (auto& c : cursors) {
                 if (c.curDoc() == pivot_doc) {
-                    // 跳到下一个 > pivot_doc 的 doc
                     while (c.ptr < c.docs.size() && c.docs[c.ptr] <= pivot_doc)
                         ++c.ptr;
                 }
             }
             changed = true;
         } else {
-            // min_doc < pivot_doc：把所有 < pivot_doc 的 cursor 跳到 pivot_doc
             for (auto& c : cursors) {
                 if (c.curDoc() < pivot_doc) {
-                    // 二分跳跃到 >= pivot_doc 的位置
                     auto it = std::lower_bound(c.docs.begin() + c.ptr,
                                                c.docs.end(), pivot_doc);
                     c.ptr = std::distance(c.docs.begin(), it);
@@ -255,18 +295,19 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
         }
     }
 
-    // 从 heap 取出结果（从小到大，需要反转）
     std::vector<SearchResult> results;
     while (!heap.empty()) {
         auto e = heap.top(); heap.pop();
         auto stored = seg.readStoredDoc(e.doc_id);
         SearchResult r;
-        r.doc_id = e.doc_id;
-        r.score  = e.score;
-        r.title  = stored.title;
+        r.doc_id  = e.doc_id;
+        r.score   = e.score;
+        r.title   = stored.title;
+        r.pubtime = seg.ffPubtime(static_cast<uint32_t>(e.doc_id) - 1);
+        r.uid     = seg.ffUid(static_cast<uint32_t>(e.doc_id) - 1);
         results.push_back(r);
     }
-    std::reverse(results.begin(), results.end());  // 高分在前
+    std::reverse(results.begin(), results.end());
     return results;
 }
 

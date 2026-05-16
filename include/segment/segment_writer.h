@@ -13,6 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "types.h"
 #include "postings/posting_list.h"
+#include "fastfield/fast_field_writer.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -39,12 +40,13 @@ class SegmentWriter {
 public:
     explicit SegmentWriter(const std::string& dir, uint32_t segment_id);
 
-    // 主入口：将内存索引和文档原文一次性 flush 到磁盘
+    // 主入口：将内存索引、文档原文和数值列一次性 flush 到磁盘
     void flush(
-        const InMemoryIndex&        mem_index,
-        const std::vector<StoredDoc>& stored_docs,
-        uint32_t                    total_docs,
-        float                       avg_doc_len  // BM25 归一化用
+        const InMemoryIndex&             mem_index,
+        const std::vector<StoredDoc>&    stored_docs,
+        const std::vector<FastFieldDoc>& ff_docs,    // 数值列存
+        uint32_t                         total_docs,
+        float                            avg_doc_len  // BM25 归一化用
     );
 
 private:

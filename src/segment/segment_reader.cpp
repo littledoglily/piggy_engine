@@ -1,4 +1,5 @@
 #include "segment/segment_reader.h"
+#include "fastfield/fast_field_reader.h"
 #include "postings/pfor_delta.h"
 #include <cstring>
 #include <cmath>
@@ -35,6 +36,7 @@ SegmentReader::SegmentReader(const std::string& dir, uint32_t segment_id)
     loadTim();
     loadFdx();
     loadLiv();
+    ff_ = std::make_unique<FastFieldReader>(dir_, seg_id_, doc_count_);
 
     // 打开磁盘文件（保持 ifstream 打开，按需 seek）
     doc_file_.open(dir_ + "/_" + std::to_string(seg_id_) + ".doc",
@@ -364,6 +366,34 @@ float SegmentReader::bm25Score(
         score += tf_norm * idf;
     }
     return score;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FastField 接口
+// ─────────────────────────────────────────────────────────────────────────────
+
+int64_t SegmentReader::ffPubtime(uint32_t local_doc_idx) const {
+    return ff_ ? ff_->pubtime(local_doc_idx) : 0;
+}
+
+int64_t SegmentReader::ffUid(uint32_t local_doc_idx) const {
+    return ff_ ? ff_->uid(local_doc_idx) : 0;
+}
+
+float SegmentReader::ffPageRank(uint32_t local_doc_idx) const {
+    return ff_ ? ff_->pageRank(local_doc_idx) : 0.0f;
+}
+
+std::vector<uint32_t> SegmentReader::filterPubtime(int64_t lo, int64_t hi) const {
+    return ff_ ? ff_->filterPubtime(lo, hi) : std::vector<uint32_t>{};
+}
+
+std::vector<uint32_t> SegmentReader::filterUid(int64_t uid_val) const {
+    return ff_ ? ff_->filterUid(uid_val) : std::vector<uint32_t>{};
+}
+
+bool SegmentReader::hasFastField() const {
+    return ff_ && ff_->hasData();
 }
 
 } // namespace ii

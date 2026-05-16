@@ -59,6 +59,29 @@ struct Document {
     std::string body;
     std::string category;
     float       page_rank = 0.0f;
+    int64_t     pubtime   = 0;    // Unix 时间戳，用于范围过滤 + 排序
+    int64_t     uid       = 0;    // 用户 ID，用于等值过滤
+};
+
+// ── FastFieldDoc：数值列存缓冲（与 StoredDoc 并行，同 flush）────────────────
+struct FastFieldDoc {
+    int64_t pubtime   = 0;
+    int64_t uid       = 0;
+    float   page_rank = 0.0f;
+};
+
+// ── NumericFilter：数值字段过滤条件 ─────────────────────────────────────────
+struct NumericFilter {
+    int64_t pubtime_lo = INT64_MIN;   // pubtime >= lo
+    int64_t pubtime_hi = INT64_MAX;   // pubtime <= hi
+    int64_t uid        = -1;          // -1 表示不过滤 uid
+    bool    sort_by_pubtime = false;  // true 则结果按 pubtime 降序排列
+
+    bool hasPubtimeRange() const {
+        return pubtime_lo != INT64_MIN || pubtime_hi != INT64_MAX;
+    }
+    bool hasUidFilter() const { return uid >= 0; }
+    bool hasAnyFilter() const { return hasPubtimeRange() || hasUidFilter(); }
 };
 
 // ── SearchResult：单条搜索结果 ───────────────────────────────────────────────
@@ -66,6 +89,8 @@ struct SearchResult {
     DocId       doc_id;
     float       score;
     std::string title;   // 从 .fdt 取回的原文字段
+    int64_t     pubtime = 0;
+    int64_t     uid     = 0;
 };
 
 } // namespace ii

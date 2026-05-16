@@ -21,6 +21,8 @@ set(LIB_SOURCES
     src/postings/pfor_delta.cpp
     src/postings/skiplist.cpp
     src/postings/posting_list.cpp
+    src/fastfield/fast_field_writer.cpp
+    src/fastfield/fast_field_reader.cpp
     src/segment/segment_writer.cpp
     src/segment/segment_reader.cpp
     src/segment/segment_merger.cpp
@@ -53,6 +55,9 @@ target_link_libraries(test_posting_list inverted_index_lib)
 
 add_executable(test_merger       tests/segment/test_merger.cpp)
 target_link_libraries(test_merger inverted_index_lib)
+
+add_executable(test_fast_field   tests/fastfield/test_fast_field.cpp)
+target_link_libraries(test_fast_field inverted_index_lib)
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")

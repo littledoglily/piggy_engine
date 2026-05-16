@@ -10,11 +10,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "types.h"
 #include "postings/skiplist.h"
+#include "fastfield/fast_field_reader.h"
 #include <string>
 #include <map>
 #include <vector>
 #include <fstream>
 #include <bitset>
+#include <memory>
 
 namespace ii {
 
@@ -62,6 +64,18 @@ public:
     float bm25Score(DocId doc_id,
                     const std::vector<std::string>& query_terms) const;
 
+    // ── FastField 接口（数值列存）─────────────────────────────────────────────
+    // local_doc_idx 为 0-indexed（Segment 内第 0 篇文档）
+    int64_t ffPubtime(uint32_t local_doc_idx)  const;
+    int64_t ffUid(uint32_t local_doc_idx)      const;
+    float   ffPageRank(uint32_t local_doc_idx) const;
+
+    // 范围过滤：返回满足条件的 local_doc_idx（0-indexed）
+    std::vector<uint32_t> filterPubtime(int64_t lo, int64_t hi) const;
+    std::vector<uint32_t> filterUid(int64_t uid_val)            const;
+
+    bool hasFastField() const;
+
 private:
     // 加载 .tim 词典到内存
     void loadTim();
@@ -92,6 +106,9 @@ private:
     mutable std::ifstream doc_file_;   // .doc
     mutable std::ifstream pos_file_;   // .pos
     mutable std::ifstream fdt_file_;   // .fdt
+
+    // 数值列存（构造时加载）
+    std::unique_ptr<FastFieldReader> ff_;
 };
 
 } // namespace ii

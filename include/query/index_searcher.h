@@ -38,6 +38,14 @@ public:
         QueryMode          mode  = QueryMode::AND
     ) const;
 
+    // 带数值过滤的搜索（FastField in-filter）
+    std::vector<SearchResult> search(
+        const std::string&   query,
+        const NumericFilter& filter,
+        int                  top_k = 10,
+        QueryMode            mode  = QueryMode::AND
+    ) const;
+
     // 打印搜索结果
     static void printResults(const std::vector<SearchResult>& results);
 
@@ -46,15 +54,22 @@ private:
     std::vector<SearchResult> searchAND(
         const std::vector<std::string>& terms,
         int top_k,
-        const SegmentReader& seg
+        const SegmentReader& seg,
+        const NumericFilter* filter
     ) const;
 
     // OR 查询：WAND 算法（上界剪枝，返回 TopK）
     std::vector<SearchResult> searchOR_WAND(
         const std::vector<std::string>& terms,
         int top_k,
-        const SegmentReader& seg
+        const SegmentReader& seg,
+        const NumericFilter* filter
     ) const;
+
+    // 对单个 doc（by local_doc_idx = doc_id-1）做数值过滤检查
+    bool passesFilter(const SegmentReader& seg,
+                      DocId doc_id,
+                      const NumericFilter& filter) const;
 
     // 跨 Segment 归并 TopK
     std::vector<SearchResult> mergeTopK(

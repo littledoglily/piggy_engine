@@ -47,6 +47,13 @@ void IndexWriter::addDocument(const Document& doc) {
     sd.category = doc.category;
     stored_docs_buf_.push_back(std::move(sd));
 
+    // 4. 暂存数值列（与 stored_docs_buf_ 并行，下标一一对应）
+    FastFieldDoc ffd;
+    ffd.pubtime   = doc.pubtime;
+    ffd.uid       = doc.uid;
+    ffd.page_rank = doc.page_rank;
+    ff_buf_.push_back(ffd);
+
     mem_index_.setDocCount(total_docs_);
 
     // 4. 检查是否需要 flush
@@ -68,13 +75,14 @@ void IndexWriter::flush() {
         : 0.0f;
 
     SegmentWriter writer(dir_, next_seg_id_);
-    writer.flush(mem_index_, stored_docs_buf_,
+    writer.flush(mem_index_, stored_docs_buf_, ff_buf_,
                  static_cast<uint32_t>(stored_docs_buf_.size()),
                  avg_doc_len);
 
     ++next_seg_id_;
-    mem_index_   = InMemoryIndex();  // 清空
+    mem_index_ = InMemoryIndex();
     stored_docs_buf_.clear();
+    ff_buf_.clear();
     total_tokens_ = 0;
 }
 

@@ -1,6 +1,7 @@
 #include "segment/segment_writer.h"
 #include "postings/pfor_delta.h"
 #include "postings/skiplist.h"
+#include "fastfield/fast_field_writer.h"
 #include <fstream>
 #include <cstring>
 #include <cmath>
@@ -73,10 +74,11 @@ float SegmentWriter::calcUB(const PostingList& pl,
 // ─────────────────────────────────────────────────────────────────────────────
 
 void SegmentWriter::flush(
-    const InMemoryIndex&        mem_index,
-    const std::vector<StoredDoc>& stored_docs,
-    uint32_t                    total_docs,
-    float                       avg_doc_len)
+    const InMemoryIndex&             mem_index,
+    const std::vector<StoredDoc>&    stored_docs,
+    const std::vector<FastFieldDoc>& ff_docs,
+    uint32_t                         total_docs,
+    float                            avg_doc_len)
 {
     std::cout << "[SegmentWriter] Flushing segment " << seg_id_
               << " (" << total_docs << " docs, "
@@ -110,6 +112,11 @@ void SegmentWriter::flush(
     strftime(tbuf, sizeof(tbuf), "%Y-%m-%dT%H:%M:%S", localtime(&now));
     si.created_at  = tbuf;
     writeSi(si);
+
+    // 7. 写 FastField 列存（_N.ff_pubtime / _N.ff_uid / _N.ff_page_rank）
+    FastFieldWriter ff_writer;
+    for (const auto& ffd : ff_docs) ff_writer.add(ffd);
+    ff_writer.flush(dir_, seg_id_);
 
     std::cout << "[SegmentWriter] Segment " << seg_id_ << " flushed OK.\n";
 }

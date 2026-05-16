@@ -229,38 +229,90 @@ _N.bkd_uid       BKD Tree 范围索引（Phase 2）
 ## 六、v2 实现顺序
 
 ```
-Step 1  types.h 扩展
-        Document 增加 pubtime(int64) / uid(int64) 字段
-        SearchRequest 结构体（含数值过滤条件）
+✅ Step 1  types.h 扩展
+           Document 增加 pubtime(int64) / uid(int64) / page_rank(float)
+           新增 FastFieldDoc / NumericFilter 结构体，扩展 SearchResult
 
-Step 2  FastFieldWriter
-        flush() 时写 _N.ff_<field>
+✅ Step 2  FastFieldWriter
+           flush() 时写 _N.ff_pubtime / _N.ff_uid / _N.ff_page_rank（定长二进制）
 
-Step 3  FastFieldReader
-        readInt64Field() / readFloatField() / rangeFilter() / readAllInt64()
+✅ Step 3  FastFieldReader
+           构造时全列加载；pubtime(idx)/uid(idx)/pageRank(idx) O(1) 访问
+           filterPubtime(lo,hi) / filterUid(val) O(N) 范围扫描
 
-Step 4  IndexWriter + SegmentWriter 集成
-        addDocument 提取数值字段，flush 时调用 FastFieldWriter
+✅ Step 4  IndexWriter + SegmentWriter 集成
+           addDocument 提取数值字段写入 ff_buf_；flush 时调用 FastFieldWriter
 
-Step 5  IndexSearcher 扩展
-        支持 SearchRequest，In-filter 模式（rangeFilter AND posting list）
-        page_rank boost 参与 BM25 打分
+✅ Step 5  IndexSearcher 扩展
+           search(..., NumericFilter, ...) 重载；In-filter 模式逐 doc 调用 passesFilter()
+           searchAND / searchOR_WAND 均支持 filter 参数；结果携带 pubtime/uid
 
-Step 6  SegmentMerger 扩展
-        merge 时重建 FastField 列（按新 doc_id 顺序重写）
+✅ Step 6  SegmentMerger 扩展
+           doMerge Step8 按新 doc_id 顺序重建 FF 列文件
+           deleteSegmentFiles 同步清理 ff_* 文件
 
-Step 7  缺口修复：惰性 Posting 迭代器（BlockSegmentPostings 模式）
+⬜ Step 7  缺口修复：惰性 Posting 迭代器（BlockSegmentPostings 模式）
 
-Step 8  BKD Tree 构建（基于 FastField 数据）
+⬜ Step 8  BKD Tree 构建（基于 FastField 数据）
 
-Step 9  BKD Tree Pre-filter 接入 SearchRequest
+⬜ Step 9  BKD Tree Pre-filter 接入 NumericFilter
 
-Step 10 缺口修复：BlockMaxWAND（消费 upper_bound + SkipNode.max_score）
+⬜ Step 10 缺口修复：BlockMaxWAND（消费 upper_bound + SkipNode.max_score）
 ```
 
 ---
 
-## 七、v2 后（v3 预留方向）
+## 七、FastField Phase 1 实现完成明细
+
+> 完成时间：2026-05-16
+
+### 7.1 修改文件清单
+
+| 文件 | 变更内容 |
+|------|---------|
+| `include/types.h` | `Document` 加 `pubtime/uid/page_rank`；新增 `FastFieldDoc`、`NumericFilter`；`SearchResult` 加 `pubtime/uid` |
+| `include/fastfield/fast_field_writer.h` | 新增。`add(FastFieldDoc)` + `flush(dir, seg_id)` + `clear()` |
+| `src/fastfield/fast_field_writer.cpp` | 新增。三列分别写 `_N.ff_pubtime / _N.ff_uid / _N.ff_page_rank`（raw binary，无 header） |
+| `include/fastfield/fast_field_reader.h` | 新增。构造时全列加载；`pubtime/uid/pageRank(idx)` O(1)；`filterPubtime/filterUid` O(N) 扫描 |
+| `src/fastfield/fast_field_reader.cpp` | 新增。文件不存在时静默跳过（兼容旧 Segment） |
+| `include/segment/segment_writer.h` | `flush()` 签名增加 `const vector<FastFieldDoc>& ff_docs` 参数 |
+| `src/segment/segment_writer.cpp` | `flush()` 末尾调用 `FastFieldWriter::flush()` 写三个 FF 文件 |
+| `include/core/index_writer.h` | 增加 `vector<FastFieldDoc> ff_buf_` 成员 |
+| `src/core/index_writer.cpp` | `addDocument` 提取数值字段存 `ff_buf_`；`flush` 传入并清空 |
+| `include/segment/segment_reader.h` | 改前向声明为直接 `#include "fastfield/fast_field_reader.h"`；声明 `ffPubtime/ffUid/ffPageRank/filterPubtime/filterUid/hasFastField`；加 `unique_ptr<FastFieldReader> ff_` 成员 |
+| `src/segment/segment_reader.cpp` | 构造时 `ff_ = make_unique<FastFieldReader>(...)`；实现全部 6 个 FF 方法 |
+| `include/query/index_searcher.h` | 增加 `search(..., NumericFilter, ...)` 重载；`searchAND/searchOR_WAND` 加 `filter` 参数；声明 `passesFilter()` |
+| `src/query/index_searcher.cpp` | 实现过滤搜索重载、`passesFilter()`（O(1) 列存查询）；`searchAND/OR_WAND` 加 in-filter 检查；结果填充 `pubtime/uid` |
+| `src/segment/segment_merger.cpp` | `doMerge` 新增 Step8 重建 FF 列；`deleteSegmentFiles` 清理 `ff_pubtime/ff_uid/ff_page_rank` |
+| `tests/fastfield/test_fast_field.cpp` | 新增。6 个测试：读写往返、pubtime 范围过滤、uid 精确过滤、缺失文件容错、IndexWriter 集成、IndexSearcher+NumericFilter 集成 |
+| `CMakeLists.txt` | `LIB_SOURCES` 加入 `fast_field_writer/reader.cpp`；添加 `test_fast_field` 可执行目标 |
+
+### 7.2 关键设计决策
+
+**forward declaration → 直接 include**：`segment_reader.h` 改为直接 include `fast_field_reader.h`，
+避免 `unique_ptr<FastFieldReader>` 析构时找不到完整类型（所有 include `segment_reader.h` 的翻译单元都会触发此问题）。
+
+**In-filter 实现**：`passesFilter(seg, doc_id, filter)` 在迭代 posting list 时对每个候选 doc 做 O(1) 列存查询，不预计算 DocIdSet，Phase 2 升级为 BKD pre-filter 时只需改调用点。
+
+**local_doc_idx 约定**：FF 文件下标为 0-indexed，`doc_id - 1 = local_doc_idx`（doc_id 从 1 开始），读取时统一转换。
+
+**merge 时 FF 重建**：在 `alive_docs` 顺序已确定后（Step1 结束）按新顺序写入 FF，保证新 Segment 的 `local_doc_idx` 与 `_N.fdt` 存储顺序对齐。
+
+### 7.3 测试结果
+
+```
+[TEST] writer_reader_roundtrip... PASS
+[TEST] filter_pubtime............. PASS
+[TEST] filter_uid................. PASS
+[TEST] missing_ff_files........... PASS
+[TEST] index_writer_integration... PASS
+[TEST] searcher_with_filter....... PASS
+All FastField tests passed.
+```
+
+---
+
+## 八、v2 后（v3 预留方向）
 
 - DSL 查询语言（`query-grammar/` 模块）：类 SQL 语法解析，支持 `AND/OR/NOT/RANGE/PHRASE`
 - 短语查询（Phrase Query）：利用已有 `.pos` 文件，实现位置约束匹配
