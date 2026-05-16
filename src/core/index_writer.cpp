@@ -6,40 +6,98 @@
 
 namespace ii {
 
-IndexWriter::IndexWriter(const std::string& dir, float ram_buffer_mb)
-    : dir_(dir), ram_buffer_mb_(ram_buffer_mb)
+IndexWriter::IndexWriter(const std::string& dir, float ram_buffer_mb, Schema schema)
+    : dir_(dir), ram_buffer_mb_(ram_buffer_mb), schema_(std::move(schema))
 {
-    // 创建索引目录
     std::filesystem::create_directories(dir_);
+    schema_.save(dir_);   // 持久化 schema.json
     std::cout << "[IndexWriter] Initialized. Dir=" << dir_
               << " RamBuffer=" << ram_buffer_mb_ << "MB\n";
 }
 
 IndexWriter::~IndexWriter() {
-    // 析构时自动 flush 剩余数据
     if (mem_index_.termCount() > 0) {
         flush();
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// addDocument：写入一篇文档
+// 字段名 → Document 具名字段的桥接（向后兼容，Step 6 改为 map 后可删除）
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::string IndexWriter::getDocText(const Document& doc, const std::string& name) {
+    if (name == "title")    return doc.title;
+    if (name == "body")     return doc.body;
+    if (name == "category") return doc.category;
+    if (name == "source")   return doc.source;
+    return "";
+}
+
+int64_t IndexWriter::getDocInt64(const Document& doc, const std::string& name) {
+    if (name == "pubtime") return doc.pubtime;
+    if (name == "uid")     return doc.uid;
+    return 0;
+}
+
+float IndexWriter::getDocFloat32(const Document& doc, const std::string& name) {
+    if (name == "page_rank") return doc.page_rank;
+    return 0.0f;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// addDocument：按 Schema 路由各字段
 // ─────────────────────────────────────────────────────────────────────────────
 
 void IndexWriter::addDocument(const Document& doc) {
     ++total_docs_;
 
-    // 1. 文本分析（title + body 合并分析）
-    std::string full_text = doc.title + " " + doc.body;
-    std::vector<Token> tokens = analyzer_.analyze(doc.doc_id, full_text);
-    total_tokens_ += tokens.size();
+    // ── 按 Schema 路由 ────────────────────────────────────────────────────────
+    // 跨 Text 字段累积位置偏移，保证同一 doc 所有字段 token 位置单调递增
+    uint32_t field_pos_base = 0;
 
-    // 2. 写入内存倒排索引
-    for (const auto& tok : tokens) {
-        mem_index_.addToken(tok);
+    for (const auto& fs : schema_.fields) {
+
+        if (fs.type == FieldType::Text || fs.type == FieldType::Keyword) {
+            std::string val = getDocText(doc, fs.name);
+
+            // 建倒排
+            if (fs.index != IndexOption::None && !val.empty()) {
+                if (fs.type == FieldType::Text) {
+                    auto tokens = analyzer_.analyze(doc.doc_id, val);
+                    total_tokens_ += tokens.size();
+                    uint32_t max_pos = field_pos_base;
+                    for (auto& tok : tokens) {
+                        tok.position += field_pos_base;
+                        if (tok.position > max_pos) max_pos = tok.position;
+                        mem_index_.addToken(tok);
+                    }
+                    field_pos_base = max_pos + 1;
+                } else {
+                    // Keyword：整体作为一个 term
+                    Token tok;
+                    tok.term      = val;
+                    tok.doc_id    = doc.doc_id;
+                    tok.position  = field_pos_base++;
+                    tok.start_off = 0;
+                    tok.end_off   = static_cast<uint32_t>(val.size());
+                    mem_index_.addToken(tok);
+                }
+            }
+
+        } else if (fs.type == FieldType::Int64) {
+            if (fs.fast) {
+                ff_writer_.addInt64(fs.name, getDocInt64(doc, fs.name));
+            }
+
+        } else if (fs.type == FieldType::Float32) {
+            if (fs.fast) {
+                ff_writer_.addFloat32(fs.name, getDocFloat32(doc, fs.name));
+            }
+        }
     }
 
-    // 3. 暂存原文
+    // ── 原文存储（按 schema 中 stored=true 的字段组装 StoredDoc）────────────
+    // StoredDoc 保持当前格式不变（Step 6 再泛化）
     StoredDoc sd;
     sd.doc_id   = doc.doc_id;
     sd.ext_id   = doc.ext_id;
@@ -49,53 +107,47 @@ void IndexWriter::addDocument(const Document& doc) {
     sd.category = doc.category;
     stored_docs_buf_.push_back(std::move(sd));
 
-    // 4. 暂存数值列（与 stored_docs_buf_ 并行，下标一一对应）
-    FastFieldDoc ffd;
-    ffd.pubtime   = doc.pubtime;
-    ffd.uid       = doc.uid;
-    ffd.page_rank = doc.page_rank;
-    ff_buf_.push_back(ffd);
-
     mem_index_.setDocCount(total_docs_);
 
-    // 4. 检查是否需要 flush
-    if (estimateRamUsage() > (size_t)(ram_buffer_mb_ * 1024 * 1024)) {
+    if (estimateRamUsage() > static_cast<size_t>(ram_buffer_mb_ * 1024 * 1024)) {
         std::cout << "[IndexWriter] RAM buffer full, auto-flushing...\n";
         flush();
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// flush：将内存索引写入磁盘 Segment
+// flush
 // ─────────────────────────────────────────────────────────────────────────────
 
 void IndexWriter::flush() {
     if (mem_index_.termCount() == 0) return;
 
     float avg_doc_len = (total_docs_ > 0)
-        ? (float)total_tokens_ / (float)total_docs_
+        ? static_cast<float>(total_tokens_) / static_cast<float>(total_docs_)
         : 0.0f;
 
-    SegmentWriter writer(dir_, next_seg_id_);
-    writer.flush(mem_index_, stored_docs_buf_, ff_buf_,
-                 static_cast<uint32_t>(stored_docs_buf_.size()),
-                 avg_doc_len);
+    SegmentWriter seg_writer(dir_, next_seg_id_);
+    seg_writer.flush(mem_index_, stored_docs_buf_,
+                     static_cast<uint32_t>(stored_docs_buf_.size()),
+                     avg_doc_len);
+
+    // FastField 独立 flush（IndexWriter 直接负责）
+    ff_writer_.flush(dir_, next_seg_id_);
 
     ++next_seg_id_;
     mem_index_ = InMemoryIndex();
     stored_docs_buf_.clear();
-    ff_buf_.clear();
+    ff_writer_.clear();
     total_tokens_ = 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// commit：flush + 写 segments_N 注册表
+// commit
 // ─────────────────────────────────────────────────────────────────────────────
 
 void IndexWriter::commit() {
     flush();
 
-    // 写 segments_N 文件（记录所有有效 Segment ID）
     std::string seg_file = dir_ + "/segments_" + std::to_string(next_seg_id_);
     std::ofstream f(seg_file, std::ios::trunc);
     if (!f) throw std::runtime_error("Cannot write segments_N");
@@ -108,20 +160,16 @@ void IndexWriter::commit() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// estimateRamUsage：粗估内存用量（字节）
+// estimateRamUsage
 // ─────────────────────────────────────────────────────────────────────────────
 
 size_t IndexWriter::estimateRamUsage() const {
-    // 粗估：每个 PostingEntry 约 32 字节 + term 字符串
     size_t estimate = 0;
     auto terms = mem_index_.sortedTerms();
     for (const auto& t : terms) {
         const PostingList* pl = mem_index_.getPostingList(t);
-        if (pl) {
-            estimate += t.size() + pl->size() * 32;
-        }
+        if (pl) estimate += t.size() + pl->size() * 32;
     }
-    // 加上原文缓冲
     for (const auto& sd : stored_docs_buf_) {
         estimate += sd.title.size() + sd.body.size() + sd.category.size() + 16;
     }
@@ -129,13 +177,10 @@ size_t IndexWriter::estimateRamUsage() const {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// deleteDocument：软删除（需要 SegmentReader 才能修改 .liv）
-// 此处简化：记录到待删除列表，commit 时处理
+// deleteDocument（软删除，简化实现）
 // ─────────────────────────────────────────────────────────────────────────────
 
 void IndexWriter::deleteDocument(DocId doc_id) {
-    // 在真实实现中，这里应找到包含该 doc_id 的 Segment 并修改其 .liv
-    // 简化：打印提示
     std::cout << "[IndexWriter] deleteDocument(" << doc_id << ") - "
               << "marking as deleted (simplified)\n";
 }

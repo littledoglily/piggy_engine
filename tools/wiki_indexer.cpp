@@ -6,16 +6,20 @@
 // Options:
 //   --input   <path>  Wiki JSONL 数据目录（递归遍历，必填）
 //   --output  <path>  索引输出目录（默认 ./wiki_index）
+//   --schema  <path>  Schema JSON 文件路径（不传则优先加载 output 目录中的
+//                     schema.json，均不存在时回退 defaultSchema）
 //   --ram     <MB>    IndexWriter RAM buffer（默认 128）
 //   --limit   <N>     最多索引 N 篇文档（默认不限）
 //   --top     <N>     打印 posting 详情的 term 数（默认 50，按 df 降序）
 //   --verbose         同时打印 top-N 之外所有 term 的 df/ttf/UB（可能数百万行，建议重定向到文件）
 //
-// 输入格式: JSON Lines，每行一个 JSON 对象，字段 id / title / text
+// 输入格式: JSON Lines，每行一个 JSON 对象
+//   字段名以 schema 定义为准；wiki 格式特殊映射：body←text，source←url
 // 输出: 构建完成后打印每个 term 的 df / ttf / UB，并对 top-N 展示 posting list 样本
 
 #include "core/index_writer.h"
 #include "segment/segment_reader.h"
+#include "schema/schema.h"
 #include "types.h"
 
 #include <algorithm>
@@ -37,7 +41,6 @@ using Clock  = std::chrono::steady_clock;
 static std::string extractJsonString(const std::string& line,
                                      const std::string& key)
 {
-    // 匹配 "key": " 或 "key":"
     std::string pat1 = "\"" + key + "\": \"";
     std::string pat2 = "\"" + key + "\":\"";
     size_t pos = line.find(pat1);
@@ -74,11 +77,93 @@ static std::string extractJsonString(const std::string& line,
     return result;
 }
 
-static uint64_t extractJsonId(const std::string& line) {
-    std::string val = extractJsonString(line, "id");
-    if (val.empty()) return 0;
-    try { return std::stoull(val); }
-    catch (...) { return 0; }
+// 从 JSON 行中提取无引号数字（先尝试带引号，再尝试不带引号）
+static int64_t extractJsonInt64(const std::string& line, const std::string& key) {
+    // 先尝试带引号的字符串数字（"id": "12345"）
+    std::string quoted = extractJsonString(line, key);
+    if (!quoted.empty()) {
+        try { return std::stoll(quoted); } catch (...) {}
+    }
+    // 再找裸数字（"pubtime": 1700000000）
+    for (const char* pat_sfx : {": ", ":"}) {
+        std::string pat = "\"" + key + "\"" + pat_sfx;
+        size_t pos = line.find(pat);
+        if (pos == std::string::npos) continue;
+        pos += pat.size();
+        while (pos < line.size() && line[pos] == ' ') ++pos;
+        if (pos >= line.size()) continue;
+        try {
+            size_t consumed = 0;
+            int64_t v = std::stoll(line.substr(pos), &consumed);
+            if (consumed > 0) return v;
+        } catch (...) {}
+    }
+    return 0;
+}
+
+static float extractJsonFloat32(const std::string& line, const std::string& key) {
+    std::string quoted = extractJsonString(line, key);
+    if (!quoted.empty()) {
+        try { return std::stof(quoted); } catch (...) {}
+    }
+    for (const char* pat_sfx : {": ", ":"}) {
+        std::string pat = "\"" + key + "\"" + pat_sfx;
+        size_t pos = line.find(pat);
+        if (pos == std::string::npos) continue;
+        pos += pat.size();
+        while (pos < line.size() && line[pos] == ' ') ++pos;
+        if (pos >= line.size()) continue;
+        try {
+            size_t consumed = 0;
+            float v = std::stof(line.substr(pos), &consumed);
+            if (consumed > 0) return v;
+        } catch (...) {}
+    }
+    return 0.0f;
+}
+
+// Wiki JSONL 与 Schema 字段名的特殊映射（其余字段名即 JSON key）
+static std::string wikiJsonKey(const std::string& field_name) {
+    if (field_name == "body")   return "text";  // wiki 把正文叫 "text"
+    if (field_name == "source") return "url";   // wiki 把来源叫 "url"
+    return field_name;
+}
+
+// 按 Schema 逐字段从 JSON 行提取值并填充 Document
+static void populateDocument(ii::Document& doc,
+                              const std::string& line,
+                              const ii::Schema&  schema)
+{
+    for (const auto& fs : schema.fields) {
+        std::string jkey = wikiJsonKey(fs.name);
+
+        if (fs.type == ii::FieldType::Text || fs.type == ii::FieldType::Keyword) {
+            std::string val = extractJsonString(line, jkey);
+            if      (fs.name == "title")    doc.title    = std::move(val);
+            else if (fs.name == "body")     doc.body     = std::move(val);
+            else if (fs.name == "category") doc.category = std::move(val);
+            else if (fs.name == "source")   doc.source   = std::move(val);
+
+        } else if (fs.type == ii::FieldType::Int64) {
+            int64_t val = extractJsonInt64(line, jkey);
+            if      (fs.name == "pubtime") doc.pubtime = val;
+            else if (fs.name == "uid")     doc.uid     = val;
+
+        } else if (fs.type == ii::FieldType::Float32) {
+            float val = extractJsonFloat32(line, jkey);
+            if (fs.name == "page_rank") doc.page_rank = val;
+        }
+    }
+}
+
+// 判断文档是否有可索引的文本内容（跳过完全为空的文档）
+static bool hasIndexableContent(const std::string& line, const ii::Schema& schema) {
+    for (const auto& fs : schema.fields) {
+        if (fs.index == ii::IndexOption::None) continue;
+        if (fs.type != ii::FieldType::Text && fs.type != ii::FieldType::Keyword) continue;
+        if (!extractJsonString(line, wikiJsonKey(fs.name)).empty()) return true;
+    }
+    return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -86,17 +171,23 @@ static uint64_t extractJsonId(const std::string& line) {
 // ─────────────────────────────────────────────────────────────────────────────
 struct Args {
     std::string input_dir;
-    std::string output_dir = "./wiki_index";
-    float       ram_mb     = 128.0f;
-    uint64_t    limit      = UINT64_MAX;
-    uint32_t    top        = 50;
-    bool        verbose    = false;
+    std::string output_dir  = "./wiki_index";
+    std::string schema_path;                   // --schema（可选）
+    float       ram_mb      = 128.0f;
+    uint64_t    limit       = UINT64_MAX;
+    uint32_t    top         = 50;
+    bool        verbose     = false;
 };
 
 static void usage(const char* prog) {
     std::cerr << "Usage: " << prog
-              << " --input <wiki_dir> [--output <dir>] [--ram <MB>]"
-                 " [--limit <N>] [--top <N>]\n";
+              << " --input <wiki_dir>"
+                 " [--output <dir>]"
+                 " [--schema <schema.json>]"
+                 " [--ram <MB>]"
+                 " [--limit <N>]"
+                 " [--top <N>]"
+                 " [--verbose]\n";
     std::exit(1);
 }
 
@@ -104,16 +195,47 @@ static Args parseArgs(int argc, char** argv) {
     Args a;
     for (int i = 1; i < argc; ++i) {
         std::string flag = argv[i];
-        if (flag == "--input"  && i+1 < argc) { a.input_dir  = argv[++i]; }
-        else if (flag == "--output" && i+1 < argc) { a.output_dir = argv[++i]; }
-        else if (flag == "--ram"    && i+1 < argc) { a.ram_mb     = std::stof(argv[++i]); }
-        else if (flag == "--limit"  && i+1 < argc) { a.limit      = std::stoull(argv[++i]); }
-        else if (flag == "--top"     && i+1 < argc) { a.top     = std::stoul(argv[++i]); }
-        else if (flag == "--verbose")              { a.verbose = true; }
+        if      (flag == "--input"  && i+1 < argc) { a.input_dir   = argv[++i]; }
+        else if (flag == "--output" && i+1 < argc) { a.output_dir  = argv[++i]; }
+        else if (flag == "--schema" && i+1 < argc) { a.schema_path = argv[++i]; }
+        else if (flag == "--ram"    && i+1 < argc) { a.ram_mb      = std::stof(argv[++i]); }
+        else if (flag == "--limit"  && i+1 < argc) { a.limit       = std::stoull(argv[++i]); }
+        else if (flag == "--top"    && i+1 < argc) { a.top         = std::stoul(argv[++i]); }
+        else if (flag == "--verbose")               { a.verbose     = true; }
         else { usage(argv[0]); }
     }
     if (a.input_dir.empty()) usage(argv[0]);
     return a;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Schema 加载 + 打印摘要
+// ─────────────────────────────────────────────────────────────────────────────
+static ii::Schema loadSchema(const Args& args) {
+    if (!args.schema_path.empty()) {
+        std::cout << "[Schema] Loading from file : " << args.schema_path << "\n";
+        return ii::Schema::fromJson(args.schema_path);
+    }
+    // 优先加载输出目录中已有的 schema.json（续建场景）
+    std::string existing = args.output_dir + "/schema.json";
+    if (fs::exists(existing)) {
+        std::cout << "[Schema] Loading from index: " << existing << "\n";
+        return ii::Schema::fromJson(existing);
+    }
+    std::cout << "[Schema] No schema specified, using defaultSchema\n";
+    return ii::Schema::defaultSchema();
+}
+
+static void printSchema(const ii::Schema& schema) {
+    std::cout << "[Schema] " << schema.fields.size() << " field(s):\n";
+    for (const auto& f : schema.fields) {
+        std::cout << "  " << std::left << std::setw(14) << f.name
+                  << " type="  << std::setw(8)  << ii::fieldTypeToStr(f.type)
+                  << " index=" << std::setw(18) << ii::indexOptionToStr(f.index);
+        if (f.stored) std::cout << " stored";
+        if (f.fast)   std::cout << " fast";
+        std::cout << "  (json_key=\"" << wikiJsonKey(f.name) << "\")\n";
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -131,16 +253,21 @@ static uint64_t buildIndex(const Args& args) {
 
     std::cout << "[Build] Found " << files.size() << " file(s) in "
               << args.input_dir << "\n";
-    std::cout << "[Build] Output dir: " << args.output_dir
+    std::cout << "[Build] Output dir : " << args.output_dir
               << "  RAM buffer: " << args.ram_mb << " MB\n";
     if (args.limit != UINT64_MAX)
-        std::cout << "[Build] Doc limit: " << args.limit << "\n";
+        std::cout << "[Build] Doc limit  : " << args.limit << "\n";
     std::cout << std::string(60, '-') << "\n";
 
-    ii::IndexWriter writer(args.output_dir, args.ram_mb);
+    // ── 加载 Schema，创建 IndexWriter ─────────────────────────────────────────
+    ii::Schema schema = loadSchema(args);
+    printSchema(schema);
+    std::cout << std::string(60, '-') << "\n";
 
-    uint64_t doc_count = 0;
-    uint64_t skip_count = 0;  // 空 text 跳过
+    ii::IndexWriter writer(args.output_dir, args.ram_mb, schema);
+
+    uint64_t doc_count  = 0;
+    uint64_t skip_count = 0;
     uint64_t file_count = 0;
     auto t_start = Clock::now();
     auto t_last  = t_start;
@@ -159,25 +286,21 @@ static uint64_t buildIndex(const Args& args) {
             if (doc_count >= args.limit) break;
             if (line.empty()) continue;
 
-            std::string text = extractJsonString(line, "text");
-            if (text.empty()) { ++skip_count; continue; }
+            // 跳过无可索引文本内容的文档
+            if (!hasIndexableContent(line, schema)) { ++skip_count; continue; }
 
             ii::Document doc;
             doc.doc_id = static_cast<ii::DocId>(doc_count + 1);  // 1-indexed
-            doc.ext_id = extractJsonId(line);                     // wiki numeric id
-            doc.source = extractJsonString(line, "url");          // wiki URL
-            doc.title  = extractJsonString(line, "title");
-            doc.body   = std::move(text);
+            doc.ext_id = static_cast<uint64_t>(extractJsonInt64(line, "id"));
+            populateDocument(doc, line, schema);
 
             writer.addDocument(doc);
             ++doc_count;
 
-            // 每 1000 篇打印一次进度
             if (doc_count % 1000 == 0) {
                 auto now = Clock::now();
                 double elapsed = std::chrono::duration<double>(now - t_start).count();
                 double rate    = doc_count / elapsed;
-                double since   = std::chrono::duration<double>(now - t_last).count();
                 std::cout << "\r[Build] " << std::setw(8) << doc_count
                           << " docs  |  " << std::fixed << std::setprecision(0)
                           << rate << " docs/s  |  "
@@ -197,7 +320,7 @@ static uint64_t buildIndex(const Args& args) {
     std::cout << "[Build] Done.\n";
     std::cout << "[Build] Files processed : " << file_count << "\n";
     std::cout << "[Build] Docs indexed    : " << doc_count << "\n";
-    std::cout << "[Build] Docs skipped    : " << skip_count << " (empty text)\n";
+    std::cout << "[Build] Docs skipped    : " << skip_count << " (no indexable content)\n";
     std::cout << "[Build] Total time      : " << std::fixed << std::setprecision(2)
               << elapsed << "s\n";
     std::cout << "[Build] Throughput      : " << std::setprecision(0)
@@ -210,7 +333,6 @@ static uint64_t buildIndex(const Args& args) {
 // 阶段二：打印 Term Posting 详情
 // ─────────────────────────────────────────────────────────────────────────────
 static void printPostings(const Args& args, bool verbose) {
-    // 收集所有 .si 文件 → 确定 segment id 列表
     std::vector<uint32_t> seg_ids;
     for (const auto& entry : fs::directory_iterator(args.output_dir)) {
         auto name = entry.path().filename().string();
@@ -228,12 +350,11 @@ static void printPostings(const Args& args, bool verbose) {
         return;
     }
 
-    // 汇总各 segment 的词典（term → 跨 segment 累加 df / ttf）
     struct GlobalMeta {
         uint32_t df  = 0;
         uint32_t ttf = 0;
-        float    ub  = 0.0f;  // 取各 segment 的最大 UB
-        uint32_t seg_id = 0;  // 该 term 所在 segment（取 df 最大的那个）
+        float    ub  = 0.0f;
+        uint32_t seg_id = 0;
     };
     std::map<std::string, GlobalMeta> global_dict;
 
@@ -258,13 +379,11 @@ static void printPostings(const Args& args, bool verbose) {
         readers.push_back(std::move(reader));
     }
 
-    // 按 df 降序排序
     std::vector<std::pair<std::string, GlobalMeta>> sorted_terms(
         global_dict.begin(), global_dict.end());
     std::sort(sorted_terms.begin(), sorted_terms.end(),
         [](const auto& a, const auto& b) { return a.second.df > b.second.df; });
 
-    // ── 打印总体统计 ────────────────────────────────────────────────────────
     std::cout << "\n" << std::string(70, '=') << "\n";
     std::cout << "  Index Statistics\n";
     std::cout << std::string(70, '=') << "\n";
@@ -277,7 +396,6 @@ static void printPostings(const Args& args, bool verbose) {
         return s;
     }() << "\n";
 
-    // ── 打印 top-N 详情 ─────────────────────────────────────────────────────
     uint32_t top = std::min((uint32_t)sorted_terms.size(), args.top);
 
     std::cout << "\n" << std::string(70, '-') << "\n";
@@ -295,7 +413,6 @@ static void printPostings(const Args& args, bool verbose) {
     for (uint32_t i = 0; i < top; ++i) {
         const auto& [term, meta] = sorted_terms[i];
 
-        // 找对应 reader（取 ub 最大的 segment）
         ii::SegmentReader* seg = nullptr;
         for (auto& r : readers) {
             if (r->segmentId() == meta.seg_id) { seg = r.get(); break; }
@@ -314,7 +431,6 @@ static void printPostings(const Args& args, bool verbose) {
             sample_str += "]";
         }
 
-        // 截断过长的 term（防止乱行）
         std::string display_term = term.size() > 25
                                    ? term.substr(0, 22) + "..."
                                    : term;
@@ -328,7 +444,6 @@ static void printPostings(const Args& args, bool verbose) {
                   << sample_str << "\n";
     }
 
-    // ── 打印剩余 term 汇总表（仅 df/ttf，不读 posting list）──────────────────
     uint64_t remaining = sorted_terms.size() - top;
     if (remaining > 0 && verbose) {
         std::cout << "\n" << std::string(70, '-') << "\n";
@@ -364,13 +479,9 @@ static void printPostings(const Args& args, bool verbose) {
 int main(int argc, char** argv) {
     Args args = parseArgs(argc, argv);
 
-    // 确保输出目录存在
     fs::create_directories(args.output_dir);
 
-    // Step 1: 构建索引
     buildIndex(args);
-
-    // Step 2: 打印 posting 统计
     printPostings(args, args.verbose);
 
     return 0;

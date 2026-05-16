@@ -70,7 +70,11 @@ public:
                     const std::vector<std::string>& query_terms) const;
 
     // ── FastField 接口（数值列存）─────────────────────────────────────────────
-    // local_doc_idx 为 0-indexed（Segment 内第 0 篇文档）
+    // 泛化访问：通过 FastFieldReader 泛化接口
+    const FastFieldReader& ff() const { return *ff_; }
+    bool hasFastField() const;
+
+    // 向后兼容命名访问（local_doc_idx 为 0-indexed）
     int64_t ffPubtime(uint32_t local_doc_idx)  const;
     int64_t ffUid(uint32_t local_doc_idx)      const;
     float   ffPageRank(uint32_t local_doc_idx) const;
@@ -78,8 +82,6 @@ public:
     // 范围过滤：返回满足条件的 local_doc_idx（0-indexed）
     std::vector<uint32_t> filterPubtime(int64_t lo, int64_t hi) const;
     std::vector<uint32_t> filterUid(int64_t uid_val)            const;
-
-    bool hasFastField() const;
 
 private:
     // 加载 .tim 词典到内存

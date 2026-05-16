@@ -1,5 +1,6 @@
 #include "segment/segment_reader.h"
 #include "fastfield/fast_field_reader.h"
+#include "schema/schema.h"
 #include "postings/pfor_delta.h"
 #include <cstring>
 #include <cmath>
@@ -36,7 +37,8 @@ SegmentReader::SegmentReader(const std::string& dir, uint32_t segment_id)
     loadTim();
     loadFdx();
     loadLiv();
-    ff_ = std::make_unique<FastFieldReader>(dir_, seg_id_, doc_count_);
+    Schema schema = Schema::load(dir_);
+    ff_ = std::make_unique<FastFieldReader>(dir_, seg_id_, doc_count_, schema);
 
     // 打开磁盘文件（保持 ifstream 打开，按需 seek）
     doc_file_.open(dir_ + "/_" + std::to_string(seg_id_) + ".doc",

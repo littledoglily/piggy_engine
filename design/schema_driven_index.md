@@ -389,3 +389,106 @@ Step 7  IndexSearcher 支持 field:query 语法
   ]
 }
 ```
+
+---
+
+## 九、实现记录（2026-05-16）
+
+> 完成状态：Step 1 / Step 3 / Step 5 已实现（对应设计中的七步计划）。  
+> Step 2（Schema 写入 .si）合并入 Step 1 处理方式——Schema 写到 `schema.json` 而非 .si，SegmentReader 构造时从目录加载，效果等价。  
+> Step 4 / Step 6 / Step 7 尚未实现。
+
+### 9.1 与原始设计的偏差
+
+| 设计点 | 原始设计 | 实际实现 | 原因 |
+|--------|---------|---------|------|
+| Schema 写入位置 | `.si` 文件 | `schema.json`（索引目录根） | 更易读、调试友好；.si 格式已固定不便扩展 |
+| SegmentWriter 签名 | 保留 `ff_docs` 参数 | 移除 `ff_docs`，FF 由 IndexWriter 直接调用 `ff_writer_.flush()` | 职责更清晰，SegmentWriter 只负责倒排和存储 |
+| FastField 字段名删除 | Schema 驱动列举 | 目录通配扫描 `_N.ff_*` | 无需重新加载 Schema 即可删除旧字段文件 |
+| Document 结构 | Step 3 保持具名结构体 | 同设计，通过桥接函数访问 | 与设计一致，Step 6 再做破坏性变更 |
+
+### 9.2 关键实现细节
+
+#### 跨字段位置偏移（Position Base）
+
+原始设计没有提及，但实现时发现是必须解决的问题：
+
+当 `title` 和 `body` 分别调用 `analyzer_.analyze()` 时，每次位置从 0 开始，同一 doc 的 posting 会出现重复位置，导致位置列表不单调，违反倒排格式约束。
+
+解决方案：在 `addDocument` 内跨字段累积 `field_pos_base`：
+
+```cpp
+uint32_t field_pos_base = 0;
+for (const auto& fs : schema_.fields) {
+    if (fs.type == FieldType::Text && fs.index != IndexOption::None) {
+        auto tokens = analyzer_.analyze(doc.doc_id, val);
+        uint32_t max_pos = field_pos_base;
+        for (auto& tok : tokens) {
+            tok.position += field_pos_base;
+            max_pos = std::max(max_pos, tok.position);
+            mem_index_.addToken(tok);
+        }
+        field_pos_base = max_pos + 1;  // 下个字段紧接在此之后
+    }
+}
+```
+
+效果：`title "Multi Python"` 的 python 在 pos=1，`body "python python"` 的 python 在 pos=2、3——位置全局单调递增。
+
+#### FastFieldWriter / Reader 泛化
+
+```cpp
+// 旧（硬编码）
+std::vector<int64_t> pubtimes_;
+std::vector<int64_t> uids_;
+std::vector<float>   page_ranks_;
+
+// 新（Schema 驱动）
+std::map<std::string, std::vector<int64_t>> int64_fields_;
+std::map<std::string, std::vector<float>>   float32_fields_;
+```
+
+文件名从 `_N.ff_pubtime` 等硬编码变为由 Schema `fast=true` 字段动态决定，格式不变（定长二进制数组）。旧的 `add(FastFieldDoc)` 和命名访问方法（`pubtime(idx)`、`uid(idx)`、`pageRank(idx)`）作为兼容层保留，内部路由到新接口。
+
+#### FastField 在 Merger 中的处理
+
+```cpp
+// Merger Step8：按 Schema 重建 FastField
+Schema schema = Schema::load(dir_);
+FastFieldWriter ff_writer;
+for (const auto& gd : alive_docs) {
+    for (const auto* fs : schema.fastFields()) {
+        if (fs->type == FieldType::Int64)
+            ff_writer.addInt64(fs->name, reader->ff().getInt64(fs->name, idx));
+        else if (fs->type == FieldType::Float32)
+            ff_writer.addFloat32(fs->name, reader->ff().getFloat32(fs->name, idx));
+    }
+}
+```
+
+### 9.3 修改的文件
+
+```
+include/schema/schema.h          ← 新增
+src/schema/schema.cpp            ← 新增
+include/fastfield/fast_field_writer.h    ← 改
+src/fastfield/fast_field_writer.cpp      ← 改
+include/fastfield/fast_field_reader.h    ← 改
+src/fastfield/fast_field_reader.cpp      ← 改
+include/core/index_writer.h      ← 改（加 Schema 参数）
+src/core/index_writer.cpp        ← 改（Schema 路由 + position base）
+include/segment/segment_writer.h ← 改（移除 ff_docs 参数）
+src/segment/segment_writer.cpp   ← 改（移除 FF flush step）
+include/segment/segment_reader.h ← 改（暴露 ff() 方法）
+src/segment/segment_reader.cpp   ← 改（加载 Schema，传给 FFReader）
+src/segment/segment_merger.cpp   ← 改（Step8 + deleteSegmentFiles）
+CMakeLists.txt                   ← 改（加入 src/schema/schema.cpp）
+```
+
+### 9.4 未实现（待后续步骤）
+
+| 步骤 | 内容 | 备注 |
+|------|------|------|
+| Step 4 | term 加字段前缀（`title:python`）；`avg_doc_len` 按字段独立统计 | 有 term 格式变更，已有索引需重建 |
+| Step 6 | Document 泛化为 `map<string, FieldValue>` | API 破坏性变更，需同步更新 wiki_indexer / wiki_searcher |
+| Step 7 | IndexSearcher 支持 `field:query` 语法 | 依赖 Step 4 |

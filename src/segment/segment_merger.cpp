@@ -1,5 +1,6 @@
 #include "segment/segment_merger.h"
 #include "fastfield/fast_field_writer.h"
+#include "schema/schema.h"
 #include <cmath>
 #include "postings/pfor_delta.h"
 #include "postings/skiplist.h"
@@ -398,22 +399,26 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         wStr(fsi, ts);
     }
 
-    // ── Step8: 重建 FastField 列存（_N.ff_pubtime / ff_uid / ff_page_rank）────
+    // ── Step8: 重建 FastField 列存（按 Schema 驱动，支持任意字段名）────────────
     {
+        Schema schema = Schema::load(dir_);
         FastFieldWriter ff_writer;
         for (const auto& gd : alive_docs) {
             SegmentReader* reader = nullptr;
             for (auto& r : readers_) {
                 if (r->segmentId() == gd.seg_id) { reader = r.get(); break; }
             }
-            FastFieldDoc ffd;
-            if (reader && reader->hasFastField()) {
-                uint32_t idx = gd.orig_doc_id - 1;  // 0-indexed
-                ffd.pubtime   = reader->ffPubtime(idx);
-                ffd.uid       = reader->ffUid(idx);
-                ffd.page_rank = reader->ffPageRank(idx);
+            uint32_t idx = gd.orig_doc_id - 1;  // 0-indexed
+            for (const auto* fs : schema.fastFields()) {
+                if (!reader || !reader->hasFastField()) {
+                    if (fs->type == FieldType::Int64)   ff_writer.addInt64  (fs->name, 0);
+                    if (fs->type == FieldType::Float32) ff_writer.addFloat32(fs->name, 0.0f);
+                } else if (fs->type == FieldType::Int64) {
+                    ff_writer.addInt64(fs->name, reader->ff().getInt64(fs->name, idx));
+                } else if (fs->type == FieldType::Float32) {
+                    ff_writer.addFloat32(fs->name, reader->ff().getFloat32(fs->name, idx));
+                }
             }
-            ff_writer.add(ffd);
         }
         ff_writer.flush(dir_, new_segment_id);
     }
@@ -464,13 +469,23 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
 // ─────────────────────────────────────────────────────────────────────────────
 
 void SegmentMerger::deleteSegmentFiles(uint32_t seg_id) {
-    for (const auto& ext : {"si","tim","doc","pos","fdt","fdx","liv",
-                             "ff_pubtime","ff_uid","ff_page_rank","pay","nvm","nvd"}) {
+    // 删除固定扩展名文件
+    for (const auto& ext : {"si","tim","doc","pos","fdt","fdx","liv","pay","nvm","nvd"}) {
         std::error_code ec;
         auto p = segPath(seg_id, ext);
         if (std::filesystem::exists(p, ec)) {
             std::filesystem::remove(p, ec);
             if (!ec) std::cout << "[Merger] Removed " << p << "\n";
+        }
+    }
+    // 删除所有 _N.ff_* 文件（字段名由 Schema 决定，用通配扫描）
+    std::string prefix = "_" + std::to_string(seg_id) + ".ff_";
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(dir_, ec)) {
+        auto name = entry.path().filename().string();
+        if (name.rfind(prefix, 0) == 0) {
+            std::filesystem::remove(entry.path(), ec);
+            if (!ec) std::cout << "[Merger] Removed " << entry.path().string() << "\n";
         }
     }
 }

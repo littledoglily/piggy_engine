@@ -17,6 +17,7 @@ include_directories(include)
 
 # ── library sources ──────────────────────────────────────────────
 set(LIB_SOURCES
+    src/schema/schema.cpp
     src/tokenizer/analyzer.cpp
     src/postings/pfor_delta.cpp
     src/postings/skiplist.cpp
@@ -58,6 +59,9 @@ target_link_libraries(test_merger inverted_index_lib)
 
 add_executable(test_fast_field   tests/fastfield/test_fast_field.cpp)
 target_link_libraries(test_fast_field inverted_index_lib)
+
+add_executable(test_schema       tests/schema/test_schema.cpp)
+target_link_libraries(test_schema inverted_index_lib)
 
 add_executable(wiki_indexer      tools/wiki_indexer.cpp)
 target_link_libraries(wiki_indexer inverted_index_lib)

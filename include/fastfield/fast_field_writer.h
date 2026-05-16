@@ -1,43 +1,41 @@
 #pragma once
 #include "types.h"
+#include <map>
 #include <string>
 #include <vector>
 
 namespace ii {
 
-// FastFieldWriter：在 flush 时将数值字段列存写入磁盘
+// FastFieldWriter：将数值字段按列写入磁盘
 //
-// 文件格式（_N.ff_pubtime / _N.ff_uid / _N.ff_pagerank）：
-//   定长数组，下标 i 对应 local_doc_idx i（0-indexed）
-//   pubtime / uid：int64_t × doc_count（每条 8 字节）
-//   page_rank    ：float   × doc_count（每条 4 字节）
+// 文件格式：_N.ff_<field_name>
+//   int64 字段：int64_t × doc_count（8 字节/条）
+//   float 字段：float   × doc_count（4 字节/条）
 //
-// 设计原则：
-//   - 定长保证 O(1) 随机访问：offset = idx × sizeof(T)
-//   - Phase 1 不压缩，Phase 2（BKD）引入块压缩
+// 向后兼容：保留 add(FastFieldDoc) 方法，内部路由到 addInt64/addFloat32。
 class FastFieldWriter {
 public:
     FastFieldWriter() = default;
 
-    // 追加一条文档的数值字段（与 StoredDoc 并行调用，顺序必须一致）
-    void add(const FastFieldDoc& doc);
+    // ── 泛化接口（Schema 驱动）────────────────────────────────────────────────
+    void addInt64  (const std::string& field, int64_t val);
+    void addFloat32(const std::string& field, float   val);
 
-    // 将缓冲数据写入磁盘，文件名：dir/_seg_id.ff_<field>
     void flush(const std::string& dir, uint32_t seg_id) const;
-
-    // flush 后清空缓冲，供 IndexWriter 复用
     void clear();
 
-    size_t size() const { return pubtimes_.size(); }
+    size_t size() const;
+
+    // ── 向后兼容（旧 FastFieldDoc 路由）────────────────────────────────────
+    void add(const FastFieldDoc& doc);
 
 private:
     std::string ffPath(const std::string& dir,
                        uint32_t seg_id,
                        const std::string& field) const;
 
-    std::vector<int64_t> pubtimes_;
-    std::vector<int64_t> uids_;
-    std::vector<float>   page_ranks_;
+    std::map<std::string, std::vector<int64_t>> int64_fields_;
+    std::map<std::string, std::vector<float>>   float32_fields_;
 };
 
 } // namespace ii
