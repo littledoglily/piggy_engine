@@ -2,15 +2,36 @@
 //
 // 用法（单次查询）:
 //   wiki_searcher --index <index_dir> --query "python language" [options]
+//   wiki_searcher --index <index_dir> --query "body:python language" --mode AND
 //
 // 用法（交互模式，不传 --query）:
 //   wiki_searcher --index <index_dir>
 //
 // Options:
 //   --index  <path>   索引目录（wiki_indexer 构建的输出，必填）
-//   --query  <text>   查询词，空格分隔多个词（不传则进入交互模式）
+//   --query  <text>   查询词（支持 field:term 语法，见下方说明）
 //   --mode   AND|OR   查询模式（默认 OR）
 //   --top    <N>      返回前 N 个结果（默认 10）
+//   --debug           打印每个 term 的 IDF / SkipNode / UB 调试信息
+//
+// 查询语法：
+//   裸词              在所有已索引字段中搜索
+//                     AND 模式：所有字段都必须包含该词（严格）
+//                     OR  模式：任意字段包含即可
+//
+//   field:term        只在指定字段中搜索该词
+//                     例：body:python        → 仅检索 body 字段
+//                         source:wikipedia  → 仅检索 source 字段
+//
+//   混合查询          裸词与 field:term 可以混用，空格分隔
+//                     例：body:python language      → body 必须有 python，
+//                                                     language 展开到所有字段
+//                         body:neural source:wiki  → body 含 neural
+//                                                     AND source 含 wiki
+//
+// 交互模式下的行内模式切换：
+//   :or  <query>      临时以 OR  模式执行本次查询
+//   :and <query>      临时以 AND 模式执行本次查询
 
 #include "query/index_searcher.h"
 #include "types.h"
@@ -33,8 +54,29 @@ struct Args {
 };
 
 static void usage(const char* prog) {
-    std::cerr << "Usage: " << prog
-              << " --index <dir> [--query <text>] [--mode AND|OR] [--top N] [--debug]\n";
+    std::cerr <<
+        "Usage: " << prog << " --index <dir> [options]\n"
+        "\n"
+        "Options:\n"
+        "  --index  <path>   索引目录（必填）\n"
+        "  --query  <text>   查询词（不填则进入交互模式）\n"
+        "  --mode   AND|OR   查询模式（默认 OR）\n"
+        "  --top    <N>      返回前 N 条结果（默认 10）\n"
+        "  --debug           打印 IDF/SkipNode/UB 调试信息\n"
+        "\n"
+        "查询语法：\n"
+        "  python language          裸词：在所有索引字段中搜索\n"
+        "  body:python              field:term：只在 body 字段中搜索\n"
+        "  body:python source:wiki  多个 field:term 混用\n"
+        "  body:python language     field:term 与裸词混用\n"
+        "\n"
+        "  OR  模式（默认）：任意字段命中即可\n"
+        "  AND 模式：裸词要求所有字段都包含；field:term 只限定该字段\n"
+        "\n"
+        "交互模式：\n"
+        "  :or  <query>      临时以 OR  模式执行\n"
+        "  :and <query>      临时以 AND 模式执行\n"
+        "  quit / Ctrl-D     退出\n";
     std::exit(1);
 }
 
@@ -123,11 +165,11 @@ int main(int argc, char** argv) {
         runQuery(args.query);
     } else {
         // 交互模式
-        std::cout << "\nInteractive mode — type a query and press Enter. "
-                     "Ctrl-D or 'quit' to exit.\n"
+        std::cout << "\nInteractive mode — type a query and press Enter. Ctrl-D or 'quit' to exit.\n"
                   << "Mode: " << (args.mode == ii::QueryMode::AND ? "AND" : "OR")
-                  << "  Top: " << args.top
-                  << "  (change with --mode / --top at startup)\n\n";
+                  << "  Top: " << args.top << "\n"
+                  << "Syntax: bare term  →  all fields   |  field:term  →  specific field\n"
+                  << "        :or <query> / :and <query>  →  one-shot mode switch\n\n";
 
         std::string line;
         while (true) {
