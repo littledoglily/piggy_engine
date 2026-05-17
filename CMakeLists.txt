@@ -69,5 +69,8 @@ target_link_libraries(wiki_indexer inverted_index_lib)
 add_executable(wiki_searcher     tools/wiki_searcher.cpp)
 target_link_libraries(wiki_searcher inverted_index_lib)
 
+add_executable(bench_search      tools/bench_search.cpp)
+target_link_libraries(bench_search inverted_index_lib)
+
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")
