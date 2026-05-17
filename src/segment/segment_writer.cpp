@@ -59,6 +59,25 @@ float SegmentWriter::calcMaxTfNorm(const PostingList& pl) {
     return max_norm;
 }
 
+std::vector<float> SegmentWriter::calcBlockMaxTfNorms(const PostingList& pl) {
+    const float k1 = 1.2f;
+    constexpr int BLOCK_SIZE = 128;
+    const auto& entries = pl.entries();
+    std::vector<float> result;
+    result.reserve((entries.size() + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    for (size_t i = 0; i < entries.size(); i += BLOCK_SIZE) {
+        size_t end = std::min(i + (size_t)BLOCK_SIZE, entries.size());
+        float max_norm = 0.0f;
+        for (size_t j = i; j < end; ++j) {
+            float tf   = static_cast<float>(entries[j].tf);
+            float norm = tf * (k1 + 1.0f) / (tf + k1);
+            max_norm   = std::max(max_norm, norm);
+        }
+        result.push_back(max_norm);
+    }
+    return result;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // flush：主入口
 // ─────────────────────────────────────────────────────────────────────────────
@@ -224,9 +243,10 @@ void SegmentWriter::writeDoc(
 
         auto& meta = term_dict[term];
 
-        std::vector<DocId> doc_ids = pl->docIds();
+        std::vector<DocId>  doc_ids    = pl->docIds();
+        std::vector<float>  block_ubs  = calcBlockMaxTfNorms(*pl);
         std::vector<SkipNode> skip_nodes;
-        std::vector<uint8_t> compressed = PForDelta::compress(doc_ids, skip_nodes, meta.upper_bound);
+        std::vector<uint8_t> compressed = PForDelta::compress(doc_ids, skip_nodes, block_ubs);
 
         // 聚合 skipnode 统计
         uint32_t sn_count = static_cast<uint32_t>(skip_nodes.size());

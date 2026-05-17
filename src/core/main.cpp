@@ -196,7 +196,7 @@ int main() {
         };
 
         std::vector<ii::SkipNode> skip_nodes;
-        auto compressed = ii::PForDelta::compress(doc_ids, skip_nodes, 0.51f);
+        auto compressed = ii::PForDelta::compress(doc_ids, skip_nodes);
 
         std::cout << "  DocIDs  : " << doc_ids.size() << " docs\n";
         std::cout << "  Original: " << doc_ids.size() * 4 << " bytes (raw int32)\n";

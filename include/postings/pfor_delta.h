@@ -53,12 +53,12 @@ public:
 
     // 压缩：将升序 doc_id 列表压缩为若干 Block 的字节序列
     // 同时输出每个 Block 对应的 SkipNode 元数据
-    // max_tf_norm：该 term 在本 segment 中的最大 tf_norm（不含 IDF），
-    //   存入 BlockHeader.max_score，查询期乘以 global_idf 得到真正 block UB
+    // block_max_tf_norms：每个 Block 各自的 max_tf_norm（不含 IDF），
+    //   长度必须等于 Block 数；传空则每个 Block 写 0.0f
     static std::vector<uint8_t> compress(
-        const std::vector<DocId>& doc_ids,
-        std::vector<SkipNode>&    skip_nodes_out,
-        float                     max_tf_norm = 0.45f  // 默认 tf=1 时的 tf_norm
+        const std::vector<DocId>&   doc_ids,
+        std::vector<SkipNode>&      skip_nodes_out,
+        const std::vector<float>&   block_max_tf_norms = {}
     );
 
     // 解压：将字节序列还原为 doc_id 列表

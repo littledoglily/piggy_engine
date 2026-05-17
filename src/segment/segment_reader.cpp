@@ -360,16 +360,12 @@ float SegmentReader::bm25Score(
         if (idf_it == term_idfs.end()) continue;
         float idf = idf_it->second;
 
-        // tf：全量读 posting list 查找该 doc（生产应缓存）
-        auto pl = readPostingList(term);
-        uint32_t tf = 0;
-        for (DocId d : pl) {
-            if (d == doc_id) { tf = 1; break; }  // 简化 tf=1
-        }
-        if (tf == 0) continue;
+        // 用惰性迭代器跳跃到 doc_id：SkipList 定位 Block + 块内扫描，O(log df)
+        auto iter = postingIterator(term);
+        if (!iter.advance(doc_id) || iter.docId() != doc_id) continue;
 
-        // tf_norm：dl=avgdl 简化（k1=1.2）
-        float tf_norm = (float)tf * (k1 + 1.0f) / ((float)tf + k1);
+        // tf 简化为 1（精确 tf 需从 .pos 读取，当前不支持）
+        constexpr float tf_norm = 1.0f * (1.2f + 1.0f) / (1.0f + 1.2f);  // k1=1.2, tf=1
         score += tf_norm * idf;
     }
     return score;

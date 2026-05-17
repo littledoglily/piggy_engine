@@ -113,17 +113,35 @@ BlockMax 剪枝使用：block_ub（当前 Block，动态更新，决定是否跳
 
 ---
 
-## max_score 存储语义确认
+## max_score 存储语义确认（已实现）
 
-当前 `SkipNode.max_score` 和 `TermMeta.upper_bound` 存的都是 **max_tf_norm**（不含 IDF），在构建期由 `calcMaxTfNorm()` 计算（见 `online_idf_ub.md`）。
+`SkipNode.max_score` 存储 **当前 Block 内** 的 max_tf_norm（不含 IDF）；
+`TermMeta.upper_bound` 存储 **整条 list** 的 max_tf_norm。两者独立计算，语义不同。
 
 查询期：
 ```
-block_ub = SkipNode.max_score * global_idf   // SkipNode.max_score = block 内 max_tf_norm
-list_ub  = TermMeta.upper_bound * global_idf // TermMeta.upper_bound = 整个 list 的 max_tf_norm
+block_ub = SkipNode.max_score * global_idf   // per-block max_tf_norm × IDF
+list_ub  = TermMeta.upper_bound * global_idf // 全局 max_tf_norm × IDF（WAND 粗筛）
 ```
 
-**注意**：`SkipNode.max_score` 目前由 `PForDelta::compress` 写入，值为 block 内所有 doc 的 max_tf_norm。需确认 `pfor_delta.cpp` 的写入逻辑与此一致（见 `online_idf_ub.md` 对 PForDelta 的改动）。
+### 实现路径
+
+**`segment_writer.cpp`**：
+- `calcMaxTfNorm(pl)` → 遍历全部 entries，取最大 tf_norm，写入 `TermMeta.upper_bound`
+- `calcBlockMaxTfNorms(pl)` → 按 128-doc 分组，逐 Block 取最大 tf_norm，返回 `vector<float>`
+
+**`pfor_delta.cpp`**：
+- `compress(doc_ids, skip_nodes_out, block_max_tf_norms)` → 每个 Block 取 `block_max_tf_norms[blk_idx]` 写入 `BlockHeader.max_score`，再同步到 `SkipNode.max_score`
+- 传空 `block_max_tf_norms`（默认参数）时每个 Block 写 0.0f（兼容旧调用路径）
+
+**调用链**（flush 时）：
+```
+writeDoc()
+  → block_ubs = calcBlockMaxTfNorms(*pl)      // per-block max_tf_norm
+  → PForDelta::compress(doc_ids, snodes, block_ubs)
+       → hdr.max_score = block_ubs[blk_idx]   // ✓ 每 Block 独立值
+       → sn.max_score  = hdr.max_score
+```
 
 ---
 

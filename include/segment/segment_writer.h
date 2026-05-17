@@ -115,8 +115,11 @@ private:
 
     void writeSi(const SegmentInfo& info);
 
-    // 计算 term 的 max_tf_norm（不含 IDF，查询期乘以 global_idf 得真正 UB）
+    // 计算整条 posting list 的 max_tf_norm（用于 TermMeta.upper_bound）
     static float calcMaxTfNorm(const PostingList& pl);
+
+    // 按 128-doc Block 分组，逐 Block 计算 max_tf_norm（用于 BlockHeader.max_score）
+    static std::vector<float> calcBlockMaxTfNorms(const PostingList& pl);
 
     // 文件路径辅助
     std::string path(const std::string& ext) const;

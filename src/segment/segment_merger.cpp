@@ -299,9 +299,24 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         new_doc_ids.reserve(merged.size());
         for (auto& [did, tf] : merged) new_doc_ids.push_back(did);
 
+        // 计算每 Block 的 max_tf_norm（不含 IDF）
+        constexpr int BLOCK_SZ = 128;
+        std::vector<float> block_ubs;
+        block_ubs.reserve((merged.size() + BLOCK_SZ - 1) / BLOCK_SZ);
+        for (size_t bi = 0; bi < merged.size(); bi += BLOCK_SZ) {
+            size_t bend = std::min(bi + (size_t)BLOCK_SZ, merged.size());
+            float blk_max = 0.0f;
+            for (size_t j = bi; j < bend; ++j) {
+                float tf_f = static_cast<float>(merged[j].second);
+                float norm = tf_f * (k1 + 1.0f) / (tf_f + k1);
+                blk_max = std::max(blk_max, norm);
+            }
+            block_ubs.push_back(blk_max);
+        }
+
         // PForDelta 压缩
         std::vector<SkipNode> skip_nodes;
-        auto compressed = PForDelta::compress(new_doc_ids, skip_nodes, idf);
+        auto compressed = PForDelta::compress(new_doc_ids, skip_nodes, block_ubs);
 
         // SkipList 序列化
         SkipList sl(skip_nodes);

@@ -336,6 +336,7 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
             cursors.pop_back();
         if (cursors.empty()) break;
 
+        // 这一步为什么要用选全局ub当pivot? pivot算法意义是什么？
         float ub_sum = 0.0f;
         size_t pivot_idx = cursors.size();
         for (size_t i = 0; i < cursors.size(); ++i) {
