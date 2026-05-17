@@ -55,6 +55,9 @@ target_link_libraries(test_skiplist inverted_index_lib)
 add_executable(test_posting_list tests/postings/test_posting_list.cpp)
 target_link_libraries(test_posting_list inverted_index_lib)
 
+add_executable(test_posting_iterator tests/postings/test_posting_iterator.cpp)
+target_link_libraries(test_posting_iterator inverted_index_lib)
+
 add_executable(test_merger       tests/segment/test_merger.cpp)
 target_link_libraries(test_merger inverted_index_lib)
 
