@@ -33,6 +33,7 @@ struct Token {
     Pos         position;   // 在文档中的第几个词（0-indexed）
     uint32_t    start_off;  // 原文字符起始偏移（高亮用）
     uint32_t    end_off;    // 原文字符结束偏移
+    std::string field;      // 产生该 token 的字段名（与 FieldSchema.name 对应）
 };
 
 // ── PostingEntry：倒排链中一个 <doc, tf, positions> 节点 ─────────────────────

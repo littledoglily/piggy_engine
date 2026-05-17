@@ -428,3 +428,93 @@ _all 字段（type:combined, sources:[title,body]）→ 写入 "_all:python"
 | Lucene OFFSETS | `index:freqs_positions_offsets` | ❌ 无此精度 | — | — | writePos 写字符偏移 |
 | 字符串列存 | `type:keyword, fast:true` | — | — | — | SortedDocValues 等价实现 |
 | 多值字段 | `type:keyword_list` 等 | ❌ 无 | — | — | Document/FieldValue 支持 vector |
+
+
+现在对整个读写热路径都有了清晰认识，可以给出评估。
+
+设计方向整体合理，但有几处需要调整，改动量也比预期大。逐条分析：
+
+好的部分
+基类 + 虚接口：正确方向。消除当前散落各处的 switch(fs.type) 和 getDocText/getDocInt64/getDocFloat32 桥接函数，扩展新字段类型不需要改核心逻辑。
+
+模板实现定长单值：合理，能复用序列化/反序列化代码。但模板参数建议用具体类型而非字节数——FixedField<int64_t> 而非 FixedField<8>，因为 4字节的 int32_t 和 float 字节数相同但算术语义完全不同，编译器无法从字节数推导类型。
+
+需要调整的地方
+1. "定长多值" 是冷门用例，不建议列为主要分类
+
+定长多值的含义是：每个 doc 有固定数量的相同类型值（如始终是 3 个 GPS 坐标，或始终是 128 维 embedding 向量）。这是向量检索场景，与当前引擎的文本检索主线无关。
+
+实际需要的分类只有三种：
+
+
+定长单值  → int64, float32, int32 等（FastField 列存）
+变长单值  → string, binary（Text/Keyword 建索引 + stored）
+变长多值  → string[]（tags/authors 等多值字段，一个 doc 多个值）
+"定长多值" 可以以后向量场景单独扩展，现在列进去反而增加无用复杂度。
+
+2. Field 对象承担了两个本质不同的职责——需要拆开
+
+用户说"通过 Field 对象封装所有信息"，但当前设计里 Field 会同时扮演两个角色：
+
+角色	生命周期	数量
+Schema 描述符（字段名/类型/索引配置）	Index 打开时创建一次，不可变	一个字段一个对象
+文档字段值（addDocument 时的具体数据）	每次 addDocument 创建，处理完丢弃	每个 doc × 每个字段
+如果把这两个合并成一个 Field 对象，每次 addDocument 都要构造 N 个 Field 对象来装值，100万文档 × 7字段 = 700万次对象构造，如果走堆分配会有明显开销。
+
+建议拆成两层：
+
+
+// Layer 1: 描述符（Schema 级，不可变，一次构造）
+class FieldDescriptor {
+    virtual std::string name()         const = 0;
+    virtual IndexOption indexOption()  const = 0;
+    virtual bool        isStored()     const = 0;
+    virtual bool        isFast()       const = 0;
+    // 派生类：FixedField<T>, VarSingleField, VarMultiField
+};
+
+// Layer 2: 文档值容器（Document 级，按字段名存）
+using FieldVal = std::variant<std::string, int64_t, float, std::vector<std::string>>;
+struct Document {
+    DocId doc_id;
+    std::unordered_map<std::string, FieldVal> fields;
+};
+Writer 循环：遍历 FieldDescriptor 列表，从 doc.fields[desc->name()] 取值，分派给各自的写入通道（InMemoryIndex / FastFieldWriter / stored buffer）。
+
+3. 虚函数在读路径热点有开销
+
+写路径（addDocument）：100K docs/s，每次虚调用完全可以接受。
+
+读路径的两个热点：
+
+FastFieldReader::getInt64(field, idx) —— 在 filter 循环里每个 doc 调用一次，目前是 map[field][idx]；加虚函数一层代价不大，但加了 map 名字查找就慢了，建议 Reader 侧不走虚函数，在打开 Segment 时把 FieldDescriptor → 内存数组指针绑定好，直接用指针访问。
+bm25Score() 内部的 FastField 读 —— 同上。
+4. 考虑不全的地方
+
+缺失项	说明
+缺失值/NULL	doc 没有某字段怎么处理？FastField 当前默认写 0，string 默认空串。需要一个 validity bitmap 或明确的 sentinel 语义
+多值字段建倒排	变长多值字段（如 tags: ["ml","python"]）需要对每个值都建倒排，addDocument 的路由逻辑需要支持 vector<string> 遍历
+StoredDoc 泛化	.fdt 的序列化格式目前硬编码 5 个字段，改为字段驱动后格式变更，旧 Segment 文件不兼容，需要版本号
+Combined/虚拟字段	多字段联合索引（_all）需要 FieldDescriptor 有 sources 属性，addDocument 时合并多源字段的 token
+IndexOption 感知位置写入	FreqsOnly 字段不应写 .pos，这个过滤点需要挂在 FieldDescriptor 上而不是 SegmentWriter 里判断
+改动量估算
+涉及约 10 个文件，~1500 行变更：
+
+
+types.h               Document 泛化（FieldVal variant）
+schema/schema.h+cpp   FieldSchema → FieldDescriptor 层级
+index_writer.cpp      移除桥接函数，按描述符循环路由
+segment_writer.cpp    StoredDoc → 字段驱动序列化
+segment_reader.cpp    readStoredDoc → 字段驱动反序列化
+fast_field_writer/reader  基本不变，接口已泛化
+segment_merger.cpp    merge 时按描述符遍历字段
+wiki_indexer.cpp      doc.set("title", val) 新风格
+全部测试文件          Document 构建方式变化
+建议
+设计合理，方向正确，但建议按以下顺序实施，每步独立可编译：
+
+Document 泛化（map<string, FieldVal>）+ 更新 addDocument 路由（移除桥接函数）—— 最高价值、改动可控
+FieldDescriptor 层级 + schema.h 改造 —— 替换现有 FieldSchema
+StoredDoc 泛化 —— .fdt 格式变更，有重建索引成本
+变长多值字段 + Combined 虚拟字段 —— 最后实施，依赖前三步
+"定长多值"建议不列入当前路线，等向量检索场景明确后再设计。

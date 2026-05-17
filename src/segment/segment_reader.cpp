@@ -6,6 +6,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
+#include <filesystem>
 #include <iostream>
 
 namespace ii {
@@ -34,22 +35,37 @@ static std::string readStr(std::ifstream& f) {
 SegmentReader::SegmentReader(const std::string& dir, uint32_t segment_id)
     : dir_(dir), seg_id_(segment_id)
 {
-    loadTim();
+    loadTim();   // sets indexed_field_names_ if per-field format
     loadFdx();
     loadLiv();
     Schema schema = Schema::load(dir_);
     ff_ = std::make_unique<FastFieldReader>(dir_, seg_id_, doc_count_, schema);
 
-    // 打开磁盘文件（保持 ifstream 打开，按需 seek）
-    doc_file_.open(dir_ + "/_" + std::to_string(seg_id_) + ".doc",
-                   std::ios::binary);
-    pos_file_.open(dir_ + "/_" + std::to_string(seg_id_) + ".pos",
-                   std::ios::binary);
-    fdt_file_.open(dir_ + "/_" + std::to_string(seg_id_) + ".fdt",
-                   std::ios::binary);
+    if (!indexed_field_names_.empty()) {
+        // Per-field 模式：为每个字段打开独立的 .doc_<field> 和 .pos_<field>
+        for (const auto& field : indexed_field_names_) {
+            auto doc_p = fieldPath(field, "doc");
+            if (std::filesystem::exists(doc_p))
+                doc_files_[field].open(doc_p, std::ios::binary);
 
-    if (!doc_file_) throw std::runtime_error("Cannot open .doc for segment " + std::to_string(seg_id_));
-    if (!fdt_file_) throw std::runtime_error("Cannot open .fdt for segment " + std::to_string(seg_id_));
+            auto pos_p = fieldPath(field, "pos");
+            if (std::filesystem::exists(pos_p))
+                per_field_pos_files_[field].open(pos_p, std::ios::binary);
+        }
+        // doc_file_ 指向第一个字段的 .doc（供 legacy readSkipList 使用）
+        if (!indexed_field_names_.empty())
+            doc_file_.open(fieldPath(indexed_field_names_[0], "doc"), std::ios::binary);
+    } else {
+        // Legacy 模式：单文件
+        doc_file_.open(path("doc"), std::ios::binary);
+        pos_file_.open(path("pos"), std::ios::binary);
+        if (!doc_file_)
+            throw std::runtime_error("Cannot open .doc for segment " + std::to_string(seg_id_));
+    }
+
+    fdt_file_.open(path("fdt"), std::ios::binary);
+    if (!fdt_file_)
+        throw std::runtime_error("Cannot open .fdt for segment " + std::to_string(seg_id_));
 
     std::cout << "[SegmentReader] Opened segment " << seg_id_
               << ": " << doc_count_ << " docs, "
@@ -60,11 +76,37 @@ std::string SegmentReader::path(const std::string& ext) const {
     return dir_ + "/_" + std::to_string(seg_id_) + "." + ext;
 }
 
+std::string SegmentReader::fieldPath(const std::string& field,
+                                      const std::string& ext) const {
+    return dir_ + "/_" + std::to_string(seg_id_) + "." + ext + "_" + field;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// loadTim：读取 .tim 词典，全部加载到 term_dict_（模拟 JVM 堆常驻）
+// loadTim：自动检测 per-field 或 legacy 格式
 // ─────────────────────────────────────────────────────────────────────────────
 
 void SegmentReader::loadTim() {
+    // 先读 .si 获取 doc_count_ 和 indexed_fields（per-field 格式标识）
+    std::string indexed_fields;
+    {
+        std::ifstream fsi(path("si"), std::ios::binary);
+        if (fsi) {
+            readU32(fsi);  // segment_id
+            doc_count_ = readU32(fsi);
+            readU32(fsi);  // term_count
+            if (fsi.good()) readStr(fsi);  // created_at
+            // indexed_fields 仅在 per-field 格式（Step 4+）的 .si 中存在
+            if (fsi.good() && fsi.peek() != std::char_traits<char>::eof())
+                indexed_fields = readStr(fsi);
+        }
+    }
+
+    if (!indexed_fields.empty()) {
+        loadPerFieldTims(indexed_fields);
+        return;
+    }
+
+    // Legacy：加载单个 _N.tim
     std::ifstream f(path("tim"), std::ios::binary);
     if (!f) throw std::runtime_error("Cannot open .tim: " + path("tim"));
 
@@ -79,14 +121,64 @@ void SegmentReader::loadTim() {
         meta.pos_offset      = readU64(f);
         meta.upper_bound     = readF32(f);
         term_dict_[term] = meta;
-        doc_count_ = std::max(doc_count_, meta.doc_freq);
+        if (doc_count_ == 0)
+            doc_count_ = std::max(doc_count_, meta.doc_freq);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// loadPerFieldTims：加载 per-field 格式的词典，合并到 term_dict_
+// ─────────────────────────────────────────────────────────────────────────────
+
+void SegmentReader::loadPerFieldTims(const std::string& indexed_fields_str) {
+    // 解析逗号分隔的字段名
+    std::vector<std::string> fields;
+    size_t start = 0;
+    while (start <= indexed_fields_str.size()) {
+        size_t end = indexed_fields_str.find(',', start);
+        if (end == std::string::npos) end = indexed_fields_str.size();
+        std::string f = indexed_fields_str.substr(start, end - start);
+        if (!f.empty()) fields.push_back(f);
+        start = end + 1;
     }
 
-    // 读 .si 获得 doc_count 精确值
-    std::ifstream fsi(path("si"), std::ios::binary);
-    if (fsi) {
-        readU32(fsi);  // segment_id
-        doc_count_ = readU32(fsi);
+    for (const auto& field : fields) {
+        std::ifstream f(fieldPath(field, "tim"), std::ios::binary);
+        if (!f) continue;
+        indexed_field_names_.push_back(field);
+
+        uint32_t term_count = readU32(f);
+        uint64_t total_ttf  = 0;
+        for (uint32_t i = 0; i < term_count; ++i) {
+            std::string term = readStr(f);
+            TermMeta meta;
+            meta.doc_freq        = readU32(f);
+            meta.total_term_freq = readU32(f);
+            meta.posting_offset  = readU64(f);
+            meta.skip_offset     = readU64(f);
+            meta.pos_offset      = readU64(f);
+            meta.upper_bound     = readF32(f);
+            field_term_dicts_[field][term] = meta;
+            total_ttf += meta.total_term_freq;
+        }
+        // avg_doc_len：总 token 数 / 文档数（Σ TTF / N）
+        field_avg_doc_lens_[field] = (doc_count_ > 0)
+            ? static_cast<float>(total_ttf) / doc_count_ : 0.f;
+    }
+
+    // 合并到 term_dict_（backward-compat 接口）：
+    //   ttf = Σ per-field ttf；df = max per-field df（保守近似）
+    for (const auto& field : indexed_field_names_) {
+        for (const auto& [term, meta] : field_term_dicts_[field]) {
+            auto it = term_dict_.find(term);
+            if (it == term_dict_.end()) {
+                term_dict_[term] = meta;
+            } else {
+                it->second.total_term_freq += meta.total_term_freq;
+                it->second.doc_freq = std::max(it->second.doc_freq, meta.doc_freq);
+                it->second.upper_bound = std::max(it->second.upper_bound, meta.upper_bound);
+            }
+        }
     }
 }
 
@@ -147,7 +239,43 @@ void SegmentReader::softDelete(DocId doc_id) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// getTermMeta
+// readFieldSkipList：从指定字段的 .doc_<field> 读取 SkipList
+// ─────────────────────────────────────────────────────────────────────────────
+
+SkipList SegmentReader::readFieldSkipList(const std::string& field,
+                                           const TermMeta& meta) const {
+    auto it = doc_files_.find(field);
+    if (it == doc_files_.end()) return SkipList{};
+    auto& f = it->second;
+    f.clear();
+    f.seekg(static_cast<std::streamoff>(meta.skip_offset));
+
+    uint32_t l0c, l1c;
+    f.read(reinterpret_cast<char*>(&l0c), 4);
+    f.read(reinterpret_cast<char*>(&l1c), 4);
+
+    size_t total = 8 + (l0c + l1c) * sizeof(SkipNode);
+    std::vector<uint8_t> buf(total);
+    f.seekg(static_cast<std::streamoff>(meta.skip_offset));
+    f.read(reinterpret_cast<char*>(buf.data()), total);
+    return SkipList::deserialize(buf.data(), buf.size());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getTermMeta（per-field 版本）
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TermMeta* SegmentReader::getTermMeta(const std::string& field,
+                                            const std::string& term) const {
+    auto fit = field_term_dicts_.find(field);
+    if (fit == field_term_dicts_.end()) return nullptr;
+    auto tit = fit->second.find(term);
+    if (tit == fit->second.end()) return nullptr;
+    return &tit->second;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getTermMeta（legacy，返回合并词典中的 meta）
 // ─────────────────────────────────────────────────────────────────────────────
 
 const TermMeta* SegmentReader::getTermMeta(const std::string& term) const {
@@ -281,16 +409,57 @@ std::vector<DocId> SegmentReader::readPostingListFrom(
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::vector<PostingEntry> SegmentReader::readPosEntries(const std::string& term) const {
+    if (!indexed_field_names_.empty()) {
+        // Per-field 模式：从各字段 .pos_<field> 读取，按 doc_id 合并
+        std::map<DocId, PostingEntry> merged;
+        for (const auto& field : indexed_field_names_) {
+            auto fit = field_term_dicts_.find(field);
+            if (fit == field_term_dicts_.end()) continue;
+            auto tit = fit->second.find(term);
+            if (tit == fit->second.end()) continue;
+
+            const TermMeta& fmeta = tit->second;
+            auto pfit = per_field_pos_files_.find(field);
+            if (pfit == per_field_pos_files_.end() || !pfit->second) continue;
+
+            auto& pf = pfit->second;
+            pf.clear();
+            pf.seekg(static_cast<std::streamoff>(fmeta.pos_offset));
+
+            for (uint32_t i = 0; i < fmeta.doc_freq; ++i) {
+                DocId   doc_id; uint32_t tf;
+                pf.read(reinterpret_cast<char*>(&doc_id), 4);
+                pf.read(reinterpret_cast<char*>(&tf),     4);
+                if (!pf) break;
+
+                auto& e = merged[doc_id];
+                e.doc_id = doc_id;
+                e.tf    += tf;
+                for (uint32_t j = 0; j < tf; ++j) {
+                    Pos p; pf.read(reinterpret_cast<char*>(&p), 4);
+                    e.positions.push_back(p);
+                }
+            }
+        }
+        std::vector<PostingEntry> result;
+        result.reserve(merged.size());
+        for (auto& [did, entry] : merged) {
+            std::sort(entry.positions.begin(), entry.positions.end());
+            result.push_back(std::move(entry));
+        }
+        return result;
+    }
+
+    // Legacy 模式
     const TermMeta* meta = getTermMeta(term);
     if (!meta) return {};
 
-    pos_file_.clear();  // seekg 不会自动清除 eofbit，必须先 clear 再检查
+    pos_file_.clear();
     pos_file_.seekg(static_cast<std::streamoff>(meta->pos_offset));
     if (!pos_file_) return {};
 
     std::vector<PostingEntry> result;
     result.reserve(meta->doc_freq);
-
     for (uint32_t i = 0; i < meta->doc_freq; ++i) {
         PostingEntry entry;
         pos_file_.read(reinterpret_cast<char*>(&entry.doc_id), 4);
@@ -344,7 +513,45 @@ SegmentReader::StoredDocResult SegmentReader::readStoredDoc(DocId doc_id) const 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// bm25Score：BM25 打分（简化，不考虑 doc length）
+// bm25Score（per-field）：字段级 BM25，使用 per-field avg_doc_len
+// ─────────────────────────────────────────────────────────────────────────────
+
+float SegmentReader::bm25Score(
+    DocId doc_id,
+    const std::string& field,
+    const std::vector<std::string>& query_terms,
+    const std::unordered_map<std::string, float>& term_idfs) const
+{
+    const float k1 = 1.2f;
+    float score = 0.0f;
+
+    for (const auto& term : query_terms) {
+        const TermMeta* meta = getTermMeta(field, term);
+        if (!meta) continue;
+
+        // IDF 优先查 "field:term" 键，回退到裸 term
+        float idf = 0.f;
+        auto idf_it = term_idfs.find(field + ":" + term);
+        if (idf_it != term_idfs.end()) {
+            idf = idf_it->second;
+        } else {
+            idf_it = term_idfs.find(term);
+            if (idf_it != term_idfs.end()) idf = idf_it->second;
+        }
+        if (idf == 0.f) continue;
+
+        auto iter = postingIterator(field, term);
+        if (!iter.advance(doc_id) || iter.docId() != doc_id) continue;
+
+        // tf 简化为 1（精确 tf 需从 .pos 读取）
+        constexpr float tf_norm = 1.0f * (1.2f + 1.0f) / (1.0f + 1.2f);
+        score += tf_norm * idf;
+    }
+    return score;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// bm25Score（legacy）：跨字段合并，不感知字段维度
 // ─────────────────────────────────────────────────────────────────────────────
 
 float SegmentReader::bm25Score(
@@ -403,14 +610,64 @@ bool SegmentReader::hasFastField() const {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// postingIterator：惰性迭代器工厂
-// 每次调用打开独立的 .doc 文件句柄，调用方可同时持有多个迭代器而不冲突
+// postingIterator（per-field）：每次调用打开独立文件句柄
+// ─────────────────────────────────────────────────────────────────────────────
+
+PostingIterator SegmentReader::postingIterator(const std::string& field,
+                                                const std::string& term) const {
+    const TermMeta* meta = getTermMeta(field, term);
+    if (!meta) return PostingIterator();
+    return PostingIterator(*meta, fieldPath(field, "doc"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// postingIterator（legacy）：返回第一个命中字段的迭代器
 // ─────────────────────────────────────────────────────────────────────────────
 
 PostingIterator SegmentReader::postingIterator(const std::string& term) const {
+    if (!indexed_field_names_.empty()) {
+        for (const auto& field : indexed_field_names_) {
+            auto fit = field_term_dicts_.find(field);
+            if (fit == field_term_dicts_.end()) continue;
+            if (fit->second.count(term))
+                return PostingIterator(fit->second.at(term), fieldPath(field, "doc"));
+        }
+        return PostingIterator();
+    }
     const TermMeta* meta = getTermMeta(term);
     if (!meta) return PostingIterator();
     return PostingIterator(*meta, path("doc"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// readPosEntries（per-field）：从 .pos_<field> 读取 <doc_id, tf, positions>
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::vector<PostingEntry> SegmentReader::readPosEntries(const std::string& field,
+                                                         const std::string& term) const {
+    const TermMeta* meta = getTermMeta(field, term);
+    if (!meta) return {};
+
+    auto pfit = per_field_pos_files_.find(field);
+    if (pfit == per_field_pos_files_.end() || !pfit->second) return {};
+
+    auto& pf = pfit->second;
+    pf.clear();
+    pf.seekg(static_cast<std::streamoff>(meta->pos_offset));
+
+    std::vector<PostingEntry> result;
+    result.reserve(meta->doc_freq);
+    for (uint32_t i = 0; i < meta->doc_freq; ++i) {
+        PostingEntry entry;
+        pf.read(reinterpret_cast<char*>(&entry.doc_id), 4);
+        pf.read(reinterpret_cast<char*>(&entry.tf),     4);
+        if (!pf) break;
+        entry.positions.resize(entry.tf);
+        for (uint32_t j = 0; j < entry.tf; ++j)
+            pf.read(reinterpret_cast<char*>(&entry.positions[j]), 4);
+        result.push_back(std::move(entry));
+    }
+    return result;
 }
 
 } // namespace ii

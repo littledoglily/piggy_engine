@@ -134,6 +134,7 @@ public:
             uint32_t max_pos = pos_base;
             for (auto& tok : tokens) {
                 tok.position += pos_base;
+                tok.field     = name_;
                 max_pos = std::max(max_pos, tok.position);
                 out.push_back(std::move(tok));
             }
@@ -146,6 +147,7 @@ public:
             tok.position  = pos_base;
             tok.start_off = 0;
             tok.end_off   = static_cast<uint32_t>(s->size());
+            tok.field     = name_;
             out.push_back(std::move(tok));
             return pos_base + 1;
         }
@@ -192,6 +194,7 @@ public:
                 auto tokens = analyzer.analyze(doc_id, s);
                 for (auto& tok : tokens) {
                     tok.position = cur_pos++;
+                    tok.field    = name_;
                     out.push_back(std::move(tok));
                 }
             } else {
@@ -201,6 +204,7 @@ public:
                 tok.position  = cur_pos++;
                 tok.start_off = 0;
                 tok.end_off   = static_cast<uint32_t>(s.size());
+                tok.field     = name_;
                 out.push_back(std::move(tok));
             }
         }
@@ -263,6 +267,7 @@ public:
                 auto tokens = analyzer.analyze(doc_id, *s);
                 for (auto& tok : tokens) {
                     tok.position += cur;
+                    tok.field     = name_;
                     cur = std::max(cur, tok.position) + 1;
                     out.push_back(std::move(tok));
                 }
@@ -273,6 +278,7 @@ public:
                 tok.position  = cur++;
                 tok.start_off = 0;
                 tok.end_off   = static_cast<uint32_t>(s->size());
+                tok.field     = name_;
                 out.push_back(std::move(tok));
             }
         }

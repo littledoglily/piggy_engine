@@ -58,8 +58,11 @@ target_link_libraries(test_posting_list inverted_index_lib)
 add_executable(test_posting_iterator tests/postings/test_posting_iterator.cpp)
 target_link_libraries(test_posting_iterator inverted_index_lib)
 
-add_executable(test_merger       tests/segment/test_merger.cpp)
+add_executable(test_merger          tests/segment/test_merger.cpp)
 target_link_libraries(test_merger inverted_index_lib)
+
+add_executable(test_per_field_index tests/segment/test_per_field_index.cpp)
+target_link_libraries(test_per_field_index inverted_index_lib)
 
 add_executable(test_fast_field   tests/fastfield/test_fast_field.cpp)
 target_link_libraries(test_fast_field inverted_index_lib)

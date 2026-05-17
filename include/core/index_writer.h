@@ -18,6 +18,7 @@
 #include "fastfield/fast_field_writer.h"
 #include <string>
 #include <vector>
+#include <map>
 #include <memory>
 #include <cstdint>
 
@@ -49,14 +50,17 @@ private:
     std::vector<std::unique_ptr<FieldDescriptor>> descriptors_;  // 从 schema_ 构建
 
     Analyzer      analyzer_;
-    InMemoryIndex mem_index_;
+
+    // per-field 倒排索引（field → InMemoryIndex）
+    std::map<std::string, InMemoryIndex> field_indexes_;
+    // per-field token 计数，用于计算 per-field avg_doc_len
+    std::map<std::string, uint64_t>      field_token_counts_;
 
     std::vector<StoredDoc> stored_docs_buf_;
     FastFieldWriter        ff_writer_;
 
-    uint32_t total_docs_   = 0;
-    uint32_t next_seg_id_  = 0;
-    uint64_t total_tokens_ = 0;
+    uint32_t total_docs_  = 0;
+    uint32_t next_seg_id_ = 0;
 
     // 每次 flush 后追加，commit() 后可通过 getter 读取
     std::vector<SegmentWriteStats> seg_stats_history_;

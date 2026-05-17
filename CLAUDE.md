@@ -196,6 +196,354 @@ std::vector<std::unique_ptr<FieldDescriptor>> buildDescriptors(const Schema& sch
 
 ---
 
+## 头文件接口速查
+
+所有头文件位于 `include/`，命名空间 `ii`。
+
+### `types.h` — 基础类型
+
+```cpp
+// 别名
+using DocId    = uint32_t;   // 1-indexed
+using TermFreq = uint32_t;
+using Pos      = uint32_t;
+static constexpr DocId INVALID_DOC = 0xFFFFFFFFu;
+
+// 字段值变体
+using FieldVal = std::variant<std::string, int64_t, float, std::vector<std::string>>;
+
+// 核心 POD
+struct Token       { std::string term; DocId doc_id; Pos position; uint32_t start_off, end_off; };
+struct PostingEntry{ DocId doc_id; TermFreq tf; std::vector<Pos> positions; };
+struct SkipNode    { DocId max_doc_id; uint64_t byte_offset; float max_score; uint32_t doc_count; };
+struct TermMeta    { uint32_t doc_freq, total_term_freq; uint64_t posting_offset, skip_offset, pos_offset; float upper_bound; };
+
+// Document：字段通过 set()/get*() 操作
+struct Document {
+    DocId doc_id; uint64_t ext_id;
+    Document& set(name, string/int64_t/float/vector<string>);  // 链式调用
+    const string& getString(name) const;
+    int64_t       getInt64(name, def=0) const;
+    float         getFloat(name, def=0.f) const;
+    const vector<string>* getStrList(name) const;
+};
+
+// 数值过滤（IndexSearcher 用）
+struct NumericFilter {
+    int64_t pubtime_lo, pubtime_hi; int64_t uid; bool sort_by_pubtime;
+    bool hasPubtimeRange() / hasUidFilter() / hasAnyFilter() const;
+};
+
+// 搜索结果
+struct SearchResult {
+    DocId doc_id; float score; uint64_t ext_id; int64_t pubtime, uid;
+    string source, title;                              // 向后兼容命名字段
+    unordered_map<string, string> stored_fields;       // 所有 stored:true 字段
+};
+```
+
+---
+
+### `schema/schema.h` — Schema 定义
+
+```cpp
+enum class FieldType  { Text, Keyword, Int64, Float32, Combined };
+enum class IndexOption{ None, DocsOnly, FreqsOnly, FreqsPositions };
+
+struct FieldSchema {
+    string name; FieldType type; IndexOption index;
+    bool stored, fast, multi;
+    vector<string> sources;   // Combined 专用
+};
+
+struct Schema {
+    vector<FieldSchema> fields;
+    const FieldSchema* find(name) const;
+    vector<const FieldSchema*> indexedFields() const;  // index != None
+    vector<const FieldSchema*> storedFields()  const;  // stored == true
+    vector<const FieldSchema*> fastFields()    const;  // fast == true
+    void         save(index_dir) const;
+    static Schema load(index_dir);          // 不存在则返回 defaultSchema()
+    static Schema fromJson(json_path);
+    static Schema defaultSchema();
+};
+// 字符串转换：fieldTypeToStr/FromStr、indexOptionToStr/FromStr
+```
+
+---
+
+### `tokenizer/analyzer.h` — 文本分析管道
+
+```cpp
+class Analyzer {
+    // 文档级分析：CharFilter → Tokenizer → StopFilter → Stem → Token 列表
+    vector<Token>  analyze(DocId doc_id, const string& text) const;
+    // 查询级分析：返回 term 列表（不含位置）
+    vector<string> analyzeQuery(const string& query) const;
+};
+```
+
+---
+
+### `postings/posting_list.h` — 内存倒排链
+
+```cpp
+class PostingList {
+    void                      append(DocId, Pos);          // 同 doc 多次调用累加 tf
+    vector<DocId>             docIds()  const;             // 升序，用于 PForDelta
+    const vector<PostingEntry>& entries() const;
+    size_t size(); bool empty(); uint32_t totalTermFreq();
+};
+
+class InMemoryIndex {
+    void                  addToken(const Token&);
+    vector<string>        sortedTerms() const;             // 字母序，flush 用
+    const PostingList*    getPostingList(term) const;
+    size_t termCount(); size_t docCount();
+    void   setDocCount(n);
+};
+```
+
+---
+
+### `postings/pfor_delta.h` — Block 压缩编解码
+
+```cpp
+struct BlockHeader { uint8_t b, size, exc_count, reserved; uint32_t max_doc_id; float max_score; uint32_t first_doc_id; };
+struct PatchEntry  { uint16_t position; uint32_t value; };
+
+class PForDelta {
+    static constexpr int BLOCK_SIZE = 128;
+    static vector<uint8_t> compress(doc_ids, skip_nodes_out, block_max_tf_norms={});
+    static vector<DocId>   decompress(data, data_len, total_docs);
+    static size_t          decompressBlock(ptr, out, base_doc_id=0);  // 返回消耗字节数
+    static size_t          blockByteSize(ptr);                        // 不解压，直接算
+};
+```
+
+---
+
+### `postings/skiplist.h` — Block 级跳表
+
+```cpp
+class SkipList {
+    static constexpr int SKIP_INTERVAL = 128;
+    explicit SkipList(vector<SkipNode> nodes);
+
+    vector<uint8_t>  serialize() const;
+    static SkipList  deserialize(data, len);
+
+    struct FindResult { uint64_t byte_offset; size_t block_index; DocId block_first_doc; };
+    FindResult       find(DocId target) const;    // O(log N)，返回 Block 偏移
+
+    const SkipNode& node(i) const; size_t size(); bool empty();
+    size_t serializedSize() const;
+};
+```
+
+---
+
+### `postings/posting_iterator.h` — 惰性迭代器
+
+```cpp
+class PostingIterator {
+    PostingIterator(const TermMeta&, const string& doc_path);  // 构造后已指向第一个 doc
+    PostingIterator() = default;                               // 空迭代器（isEnd()==true）
+    // 不可拷贝，可移动
+
+    DocId docId()         const;   // 当前 doc_id
+    float blockMaxScore() const;   // 当前 Block 的 max_score（WAND 用）
+    DocId blockMaxDocId() const;   // 当前 Block 末尾 doc_id（BlockMaxWAND 用）
+    bool  isEnd()         const;
+
+    bool next();               // 推进到下一个 doc；false 表示耗尽
+    bool advance(DocId target);// 跳到第一个 >= target；false 表示不存在
+};
+```
+
+---
+
+### `fastfield/fast_field_writer.h` — 数值列存写入
+
+```cpp
+struct FFWriteStats { map<string, uint64_t> file_bytes; uint64_t total_bytes, total_us; };
+
+class FastFieldWriter {
+    void         addInt64  (field, int64_t);
+    void         addFloat32(field, float);
+    FFWriteStats flush(dir, seg_id) const;   // 写 _N.ff_<field>
+    void         clear();
+    size_t       size() const;
+    void         add(const FastFieldDoc&);   // 向后兼容
+};
+```
+
+---
+
+### `fastfield/fast_field_reader.h` — 数值列存读取
+
+```cpp
+class FastFieldReader {
+    FastFieldReader(dir, seg_id, doc_count, schema);   // Schema 驱动（推荐）
+    FastFieldReader(dir, seg_id, doc_count);           // 向后兼容
+
+    bool    hasField  (field) const;
+    int64_t getInt64  (field, idx) const;    // O(1) 随机访问
+    float   getFloat32(field, idx) const;
+    vector<uint32_t> filterInt64(field, lo, hi) const;  // 范围过滤→local_doc_idx 列表
+
+    // 向后兼容命名方法
+    int64_t pubtime(idx); int64_t uid(idx); float pageRank(idx);
+    vector<uint32_t> filterPubtime(lo, hi); vector<uint32_t> filterUid(uid_val);
+    const vector<int64_t>& allPubtimes(); const vector<int64_t>& allUids();
+    const vector<float>&   allPageRanks();
+
+    uint32_t docCount(); bool hasData();
+};
+```
+
+---
+
+### `segment/segment_writer.h` — Flush 内存索引到磁盘
+
+```cpp
+struct SegmentWriteStats {
+    uint32_t segment_id, doc_count, term_count;
+    uint64_t total_pl_entries; uint32_t max_pl_df; string max_pl_term; float avg_pl_df;
+    uint64_t total_skip_nodes; uint32_t max_skip_nodes; string max_skip_term;
+    uint64_t tim_bytes, doc_bytes, pos_bytes, fdt_bytes, fdx_bytes, liv_bytes, si_bytes;
+    uint64_t tim_us, doc_us, pos_us, fdt_fdx_us;
+    uint64_t totalSegBytes(); uint64_t totalSegUs();
+};
+
+struct StoredDoc { DocId doc_id; uint64_t ext_id; unordered_map<string,string> str_fields; };
+
+class SegmentWriter {
+    explicit SegmentWriter(dir, segment_id);
+    SegmentWriteStats flush(mem_index, stored_docs, total_docs, avg_doc_len);
+};
+```
+
+---
+
+### `segment/segment_reader.h` — 只读查询 Segment
+
+```cpp
+class SegmentReader {
+    static constexpr uint32_t MAX_DOCS = 65536;
+    explicit SegmentReader(dir, segment_id);
+
+    // 存活管理
+    bool isAlive(DocId) const;
+    void softDelete(DocId);
+
+    // 倒排查询
+    const TermMeta*          getTermMeta(term) const;
+    vector<DocId>            readPostingList(term) const;           // 全量解压
+    vector<DocId>            readPostingListFrom(term, target) const;// 跳跃读取（AND 用）
+    vector<PostingEntry>     readPosEntries(term) const;            // 带位置
+    PostingIterator          postingIterator(term) const;           // 惰性迭代器（推荐）
+
+    // 文档原文
+    struct StoredDocResult {
+        DocId doc_id; uint64_t ext_id;
+        unordered_map<string,string> str_fields;
+        const string& get(key) const;
+        const string& source()/title()/body()/category() const;  // 向后兼容
+    };
+    StoredDocResult readStoredDoc(DocId) const;
+
+    // BM25 打分
+    float bm25Score(doc_id, query_terms, term_idfs) const;
+
+    // FastField 数值列存
+    const FastFieldReader& ff() const;
+    bool hasFastField() const;
+    int64_t ffPubtime(local_idx); int64_t ffUid(local_idx); float ffPageRank(local_idx);
+    vector<uint32_t> filterPubtime(lo, hi); vector<uint32_t> filterUid(uid_val);
+
+    // 元数据
+    uint32_t docCount(); uint32_t termCount(); uint32_t segmentId();
+    const map<string, TermMeta>& termDict() const;
+    SkipList readTermSkipList(term) const;
+};
+```
+
+---
+
+### `segment/segment_merger.h` — Segment 合并与软删除
+
+```cpp
+enum class MergePolicy { FORCE, TIERED };
+
+struct MergeStats {
+    uint32_t input_segment_count, input_doc_count;
+    uint32_t deleted_doc_count, output_doc_count, output_segment_id;
+    size_t   input_bytes, output_bytes;
+};
+
+class SegmentMerger {
+    explicit SegmentMerger(dir);
+
+    // 软删除
+    bool softDelete(DocId);                      // 在所有 Segment 中搜索并标记
+    int  softDeleteBatch(vector<DocId>);
+    bool isAlive(DocId) const;
+
+    // 合并
+    MergeStats mergeAll(new_segment_id);         // 强制合并所有 Segment
+    MergeStats mergeIfNeeded(policy=TIERED, max_segments=5);
+
+    // 注册表
+    vector<uint32_t> activeSegmentIds() const;
+    void printStats() const;
+};
+```
+
+---
+
+### `core/index_writer.h` — 文档写入入口
+
+```cpp
+class IndexWriter {
+    IndexWriter(dir, ram_buffer_mb=16.f, schema=Schema::defaultSchema());
+    ~IndexWriter();
+
+    void addDocument(const Document&);
+    void deleteDocument(DocId);
+    void flush();   // 手动触发（RAM 超阈值自动触发）
+    void commit();
+
+    uint32_t totalDocs()    const;
+    uint32_t segmentCount() const;
+    const vector<SegmentWriteStats>& segStatsHistory() const;
+    const vector<FFWriteStats>&      ffStatsHistory()  const;
+};
+```
+
+---
+
+### `query/index_searcher.h` — 检索入口
+
+```cpp
+enum class QueryMode { AND, OR };
+
+class IndexSearcher {
+    explicit IndexSearcher(dir);   // 加载所有 Segment
+
+    // 基础搜索（query 空格分隔）
+    vector<SearchResult> search(query, top_k=10, mode=AND) const;
+
+    // 带数值过滤（FastField in-filter）
+    vector<SearchResult> search(query, NumericFilter, top_k=10, mode=AND) const;
+
+    static void printResults(const vector<SearchResult>&);
+    void setDebug(bool);   // 开启 IDF/SkipNode/UB 调试输出
+};
+```
+
+---
+
 ## 当前实现状态
 
 | 功能 | 状态 | 说明 |
@@ -208,18 +556,16 @@ std::vector<std::unique_ptr<FieldDescriptor>> buildDescriptors(const Schema& sch
 | VarMultiField（`multi:true`） | ✅ | `vector<string>` 多值；`buildDescriptors()` 路由 |
 | CombinedField 虚拟字段 | ✅ | `sources` 联合分词；`buildTokensDoc()` 重载 |
 | PostingIterator 惰性迭代器 | ✅ | `postingIterator(term)` 独立文件句柄，支持 AND zigzag |
-| term 字段前缀（`title:python`） | ⬜ | IndexSearcher 尚不支持 `field:query` 语法 |
-| avg_doc_len 按字段独立统计 | ⬜ | 当前全字段合并计算 |
-| IndexSearcher `field:query` 语法 | ⬜ | 待实现查询解析层 |
+| term 字段前缀（`title:python`） | ✅ | IndexSearcher 支持 `field:query` 语法（parseQuery + FieldTerm） |
+| avg_doc_len 按字段独立统计 | ✅ | `field_avg_doc_lens_` 从 .tim_<field> 派生，BM25 per-field 打分 |
+| IndexSearcher `field:query` 语法 | ✅ | `parseQuery`/`computeFieldTermIdfs`/`scoreDoc` 全部实现 |
 | Merge 时重算 IDF/UB | ⬜ | 当前 merge 复用各 Segment 的近似 UB |
 
 ---
 
 ## 待办（TODO）
 
-1. **`field:query` 查询语法**：`IndexSearcher::search()` 支持 `"title:python"` 格式，只在指定字段的 term 空间搜索。
-2. **avg_doc_len 按字段独立**：每个 Text 字段单独统计平均文档长度，BM25 打分更准确。
-3. **BlockMaxWAND 真正消费**：`TermMeta::upper_bound` 和 `SkipNode::max_score` 已写入磁盘，但查询时尚未用于 Block 级剪枝（实现后可跳过 90%+ 无效 Block）。
+1. **BlockMaxWAND 真正消费**：`TermMeta::upper_bound` 和 `SkipNode::max_score` 已写入磁盘，但查询时尚未用于 Block 级剪枝（实现后可跳过 90%+ 无效 Block）。
 4. **Posting List 惰性迭代器扩展**：`PostingIterator` 已支持 AND，WAND OR 路径仍用全量解压；可扩展为 block-level seek。
 5. **Merge 时重算 IDF/UB**：`SegmentMerger::doMerge()` 已用最终 N 重算 IDF，但 SkipNode.max_score 未同步更新。
 6. **stored 字段支持数值类型**：`FixedField<T>::storeStr()` 当前返回空串，需要决策是否在 `.fdt` 存储数值的字符串表示。

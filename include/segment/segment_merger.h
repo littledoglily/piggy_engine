@@ -104,6 +104,9 @@ private:
 
     // 文件路径辅助
     std::string segPath(uint32_t seg_id, const std::string& ext) const;
+    // _N.doc_title, _N.tim_body …（per-field 格式）
+    std::string segFieldPath(uint32_t seg_id, const std::string& field,
+                             const std::string& ext) const;
     std::string dir_;
 
     // 已加载的 SegmentReader（软删除时需要）

@@ -198,167 +198,181 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
               << " deleted=" << total_deleted
               << " alive=" << output_doc_count << "\n";
 
-    // ── Step2: 建立合并词表（所有 Segment 的 term 并集）─────────────────────
-    std::set<std::string> all_terms;
-    for (uint32_t sid : src_ids) {
-        SegmentReader* reader = nullptr;
-        for (auto& r : readers_) {
-            if (r->segmentId() == sid) { reader = r.get(); break; }
-        }
-        if (!reader) continue;
+    // ── Step2: 收集所有字段（所有 Segment 的 indexedFieldNames 取并集）──────
+    Schema schema = Schema::load(dir_);
 
-        // 读 .tim 词典，获取所有 term
-        std::ifstream ftim(segPath(sid, "tim"), std::ios::binary);
-        if (!ftim) continue;
-        uint32_t tc; ftim.read((char*)&tc, 4);
-        for (uint32_t i = 0; i < tc; ++i) {
-            uint32_t len; ftim.read((char*)&len, 4);
-            std::string term(len, '\0'); ftim.read(&term[0], len);
-            all_terms.insert(term);
-            // skip rest of entry (4+4+8+8+8+4 = 36 bytes)
-            ftim.seekg(36, std::ios::cur);
+    std::vector<std::string> all_fields;
+    {
+        std::set<std::string> fset;
+        for (uint32_t sid : src_ids) {
+            for (auto& r : readers_) {
+                if (r->segmentId() != sid) continue;
+                for (const auto& f : r->indexedFieldNames())
+                    fset.insert(f);
+            }
         }
+        all_fields.assign(fset.begin(), fset.end());
     }
-    std::cout << "[Merger] Merged term count=" << all_terms.size() << "\n";
+    std::cout << "[Merger] Indexed fields: " << all_fields.size() << "\n";
 
-    // ── Step3: 对每个 term 多路归并 posting list ──────────────────────────────
-    // 结果写入新 Segment 的 .doc / .tim / .pos 文件
+    // ── Step3: 对每个字段独立执行 term 多路归并 ────────────────────────────────
+    //
+    // per-field 版本：每个字段产生独立的 _N.tim_<field> / .doc_<field> / .pos_<field>
+    // FreqsOnly 字段：从 PostingIterator 读 doc_ids，位置数据不存在，tf 设为 1
+    // FreqsPositions 字段：从 readPosEntries(field, term) 读 doc_ids+tf+positions
 
-    // 先准备新 .tim 的数据结构
     struct NewTermMeta {
-        uint32_t df;
-        uint32_t total_tf;
-        uint64_t posting_offset;
-        uint64_t skip_offset;
-        uint64_t pos_offset;
+        uint32_t df, total_tf;
+        uint64_t posting_offset, skip_offset, pos_offset;
         float    upper_bound;
     };
-    std::map<std::string, NewTermMeta> new_term_dict;
 
-    // 打开输出文件
-    std::ofstream fdoc(segPath(new_segment_id, "doc"), std::ios::binary|std::ios::trunc);
-    std::ofstream fpos(segPath(new_segment_id, "pos"), std::ios::binary|std::ios::trunc);
-    if (!fdoc || !fpos) throw std::runtime_error("Cannot create merge output files");
+    const float k1 = 1.2f;
+    uint32_t total_term_count = 0;
 
-    // BM25 参数
-    const float k1 = 1.2f, b_param = 0.75f;
-    float avg_doc_len = 70.0f;  // 近似值
+    for (const auto& field : all_fields) {
+        const FieldSchema* fs = schema.find(field);
+        bool has_positions = fs && (fs->index == IndexOption::FreqsPositions);
 
-    for (const auto& term : all_terms) {
-        // 收集该 term 在所有源 Segment 中的存活 posting entries
-        // 用新 global_doc_id，按升序排列
-        std::vector<std::pair<DocId, uint32_t>> merged;  // <new_doc_id, tf>
-        std::vector<std::pair<DocId, std::vector<Pos>>> merged_pos;  // <new_doc_id, positions>
-
+        // 2a. 收集该字段的全部 term（各 Segment 并集）
+        std::set<std::string> field_terms;
         for (uint32_t sid : src_ids) {
-            SegmentReader* reader = nullptr;
             for (auto& r : readers_) {
-                if (r->segmentId() == sid) { reader = r.get(); break; }
-            }
-            if (!reader) continue;
-
-            const TermMeta* tm = reader->getTermMeta(term);
-            if (!tm) continue;
-
-            // 从 .pos 读取该 term 的真实 tf 和位置信息
-            auto pos_entries = reader->readPosEntries(term);
-
-            for (const auto& entry : pos_entries) {
-                // remap 已在 step1 过滤死文档，查不到即跳过
-                uint64_t key = ((uint64_t)sid << 20) | entry.doc_id;
-                auto it = remap.find(key);
-                if (it == remap.end()) continue;
-                DocId new_doc_id = it->second;
-
-                merged.push_back({new_doc_id, entry.tf});
-                merged_pos.push_back({new_doc_id, entry.positions});
+                if (r->segmentId() != sid) continue;
+                const auto* fdict = r->fieldTermDict(field);
+                if (!fdict) continue;
+                for (const auto& [term, _] : *fdict)
+                    field_terms.insert(term);
             }
         }
+        if (field_terms.empty()) continue;
 
-        if (merged.empty()) continue;
-
-        // 按新 doc_id 排序（多 Segment 归并后可能乱序）
-        std::sort(merged.begin(), merged.end());
-        std::sort(merged_pos.begin(), merged_pos.end());
-
-        // 计算 IDF / UB
-        uint32_t df   = (uint32_t)merged.size();
-        float    idf  = std::log(1.0f + (float)(output_doc_count - df + 0.5f)
-                                       / (float)(df + 0.5f));
-        uint32_t max_tf = 0;
-        for (auto& [did, tf] : merged) max_tf = std::max(max_tf, tf);
-        float max_tf_f = static_cast<float>(max_tf > 0 ? max_tf : 1);
-        float    ub   = (max_tf_f * (k1+1.0f) / (max_tf_f + k1*(1.0f-b_param+b_param))) * idf;
-
-        // 提取 doc_id 列表
-        std::vector<DocId> new_doc_ids;
-        new_doc_ids.reserve(merged.size());
-        for (auto& [did, tf] : merged) new_doc_ids.push_back(did);
-
-        // 计算每 Block 的 max_tf_norm（不含 IDF）
-        constexpr int BLOCK_SZ = 128;
-        std::vector<float> block_ubs;
-        block_ubs.reserve((merged.size() + BLOCK_SZ - 1) / BLOCK_SZ);
-        for (size_t bi = 0; bi < merged.size(); bi += BLOCK_SZ) {
-            size_t bend = std::min(bi + (size_t)BLOCK_SZ, merged.size());
-            float blk_max = 0.0f;
-            for (size_t j = bi; j < bend; ++j) {
-                float tf_f = static_cast<float>(merged[j].second);
-                float norm = tf_f * (k1 + 1.0f) / (tf_f + k1);
-                blk_max = std::max(blk_max, norm);
-            }
-            block_ubs.push_back(blk_max);
-        }
-
-        // PForDelta 压缩
-        std::vector<SkipNode> skip_nodes;
-        auto compressed = PForDelta::compress(new_doc_ids, skip_nodes, block_ubs);
-
-        // SkipList 序列化
-        SkipList sl(skip_nodes);
-        auto sl_bytes = sl.serialize();
-
-        // 记录偏移
-        NewTermMeta ntm;
-        ntm.df             = df;
-        uint32_t total_tf = 0;
-        for (auto& [did, tf] : merged) total_tf += tf;
-        ntm.total_tf       = total_tf;
-        ntm.skip_offset    = (uint64_t)fdoc.tellp();
-        ntm.posting_offset = ntm.skip_offset + sl_bytes.size();
-        ntm.pos_offset     = (uint64_t)fpos.tellp();
-        ntm.upper_bound    = ub;
-
-        // 写 .doc
-        wBytes(fdoc, sl_bytes);
-        wBytes(fdoc, compressed);
-
-        // 写 .pos
-        for (auto& [did, positions] : merged_pos) {
-            wU32(fpos, did);
-            wU32(fpos, (uint32_t)positions.size());
-            for (Pos p : positions) wU32(fpos, p);
-        }
-
-        new_term_dict[term] = ntm;
-    }
-    fdoc.close();
-    fpos.close();
-
-    // ── Step4: 写新 .tim ─────────────────────────────────────────────────────
-    {
-        std::ofstream ftim(segPath(new_segment_id, "tim"),
+        // 2b. 打开输出文件
+        std::ofstream fdoc(segFieldPath(new_segment_id, field, "doc"),
                            std::ios::binary|std::ios::trunc);
-        wU32(ftim, (uint32_t)new_term_dict.size());
-        for (const auto& [term, m] : new_term_dict) {
-            wStr(ftim, term);
-            wU32(ftim, m.df);
-            wU32(ftim, m.total_tf);
-            wU64(ftim, m.posting_offset);
-            wU64(ftim, m.skip_offset);
-            wU64(ftim, m.pos_offset);
-            wF32(ftim, m.upper_bound);
+        std::ofstream fpos;
+        if (has_positions)
+            fpos.open(segFieldPath(new_segment_id, field, "pos"),
+                      std::ios::binary|std::ios::trunc);
+        if (!fdoc) throw std::runtime_error("Cannot create .doc_" + field);
+
+        std::map<std::string, NewTermMeta> field_term_dict;
+
+        // 2c. 对每个 term 多路归并
+        for (const auto& term : field_terms) {
+            std::vector<std::pair<DocId, uint32_t>>          merged;     // <new_doc_id, tf>
+            std::vector<std::pair<DocId, std::vector<Pos>>>  merged_pos; // <new_doc_id, positions>
+
+            for (uint32_t sid : src_ids) {
+                SegmentReader* reader = nullptr;
+                for (auto& r : readers_) {
+                    if (r->segmentId() == sid) { reader = r.get(); break; }
+                }
+                if (!reader) continue;
+
+                if (has_positions) {
+                    // FreqsPositions：readPosEntries 提供 doc_id + tf + positions
+                    for (const auto& entry : reader->readPosEntries(field, term)) {
+                        uint64_t key = ((uint64_t)sid << 20) | entry.doc_id;
+                        auto it = remap.find(key);
+                        if (it == remap.end()) continue;  // 已删除
+                        merged.push_back({it->second, entry.tf});
+                        merged_pos.push_back({it->second, entry.positions});
+                    }
+                } else {
+                    // FreqsOnly：PostingIterator 提供 doc_ids；tf 近似为 1
+                    auto iter = reader->postingIterator(field, term);
+                    while (!iter.isEnd()) {
+                        uint64_t key = ((uint64_t)sid << 20) | iter.docId();
+                        auto it = remap.find(key);
+                        if (it != remap.end())
+                            merged.push_back({it->second, 1u});
+                        iter.next();
+                    }
+                }
+            }
+
+            if (merged.empty()) continue;
+
+            // 按新 doc_id 升序排列
+            std::sort(merged.begin(), merged.end());
+            if (has_positions) std::sort(merged_pos.begin(), merged_pos.end());
+
+            // 用最终 N 重算 IDF / UB
+            uint32_t df = (uint32_t)merged.size();
+            float idf   = std::log(1.0f + (float)(output_doc_count - df + 0.5f)
+                                         / (float)(df + 0.5f));
+            uint32_t max_tf = 0;
+            for (auto& [did, tf] : merged) max_tf = std::max(max_tf, tf);
+            float max_tf_f = max_tf > 0 ? (float)max_tf : 1.f;
+            float ub = (max_tf_f * (k1 + 1.f) / (max_tf_f + k1)) * idf;
+
+            // 提取 doc_id 列表 + block max_tf_norm
+            std::vector<DocId> new_doc_ids;
+            new_doc_ids.reserve(merged.size());
+            for (auto& [did, _tf] : merged) new_doc_ids.push_back(did);
+
+            constexpr int BLOCK_SZ = 128;
+            std::vector<float> block_ubs;
+            block_ubs.reserve((merged.size() + BLOCK_SZ - 1) / BLOCK_SZ);
+            for (size_t bi = 0; bi < merged.size(); bi += BLOCK_SZ) {
+                size_t bend = std::min(bi + (size_t)BLOCK_SZ, merged.size());
+                float blk_max = 0.f;
+                for (size_t j = bi; j < bend; ++j) {
+                    float tf_f = (float)merged[j].second;
+                    blk_max = std::max(blk_max, tf_f * (k1 + 1.f) / (tf_f + k1));
+                }
+                block_ubs.push_back(blk_max);
+            }
+
+            // PForDelta + SkipList
+            std::vector<SkipNode> skip_nodes;
+            auto compressed = PForDelta::compress(new_doc_ids, skip_nodes, block_ubs);
+            SkipList sl(skip_nodes);
+            auto sl_bytes = sl.serialize();
+
+            NewTermMeta ntm;
+            ntm.df             = df;
+            ntm.total_tf       = 0;
+            for (auto& [did, tf] : merged) ntm.total_tf += tf;
+            ntm.skip_offset    = (uint64_t)fdoc.tellp();
+            ntm.posting_offset = ntm.skip_offset + sl_bytes.size();
+            ntm.pos_offset     = has_positions ? (uint64_t)fpos.tellp() : 0;
+            ntm.upper_bound    = ub;
+
+            wBytes(fdoc, sl_bytes);
+            wBytes(fdoc, compressed);
+
+            if (has_positions) {
+                for (auto& [did, positions] : merged_pos) {
+                    wU32(fpos, did);
+                    wU32(fpos, (uint32_t)positions.size());
+                    for (Pos p : positions) wU32(fpos, p);
+                }
+            }
+
+            field_term_dict[term] = ntm;
         }
+
+        // 2d. 写 _N.tim_<field>
+        {
+            std::ofstream ftim(segFieldPath(new_segment_id, field, "tim"),
+                               std::ios::binary|std::ios::trunc);
+            wU32(ftim, (uint32_t)field_term_dict.size());
+            for (const auto& [term, m] : field_term_dict) {
+                wStr(ftim, term);
+                wU32(ftim, m.df);
+                wU32(ftim, m.total_tf);
+                wU64(ftim, m.posting_offset);
+                wU64(ftim, m.skip_offset);
+                wU64(ftim, m.pos_offset);
+                wF32(ftim, m.upper_bound);
+            }
+        }
+
+        total_term_count += (uint32_t)field_term_dict.size();
+        std::cout << "[Merger] Field \"" << field << "\": "
+                  << field_terms.size() << " terms merged\n";
     }
 
     // ── Step5: 写新 .fdt / .fdx（合并后的文档原文）───────────────────────────
@@ -400,15 +414,21 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         fliv.write((char*)bitmap.data(), bytes);
     }
 
-    // ── Step7: 写新 .si ───────────────────────────────────────────────────────
+    // ── Step7: 写新 .si（含 indexed_fields，供 SegmentReader 发现 per-field 文件）
     {
         std::ofstream fsi(segPath(new_segment_id, "si"),
                           std::ios::binary|std::ios::trunc);
         wU32(fsi, new_segment_id);
         wU32(fsi, output_doc_count);
-        wU32(fsi, (uint32_t)new_term_dict.size());
-        std::string ts = "merged";
-        wStr(fsi, ts);
+        wU32(fsi, total_term_count);
+        wStr(fsi, std::string("merged"));
+
+        std::string ifields;
+        for (size_t i = 0; i < all_fields.size(); ++i) {
+            if (i) ifields += ',';
+            ifields += all_fields[i];
+        }
+        wStr(fsi, ifields);
     }
 
     // ── Step8: 重建 FastField 列存（按 Schema 驱动，支持任意字段名）────────────
@@ -445,12 +465,24 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         deleteSegmentFiles(sid);
     }
 
-    // 统计输出文件大小
+    // 统计输出文件大小（per-field 文件 + 共享文件）
     size_t out_bytes = 0;
-    for (const auto& ext : {"tim","doc","pos","fdt","fdx","liv","si"}) {
+    for (const auto& ext : {"fdt","fdx","liv","si"}) {
         std::error_code ec;
         auto sz = std::filesystem::file_size(segPath(new_segment_id, ext), ec);
         if (!ec) out_bytes += sz;
+    }
+    // per-field 文件（tim_<field>, doc_<field>, pos_<field>）
+    {
+        std::error_code ec;
+        std::string prefix = "_" + std::to_string(new_segment_id) + ".";
+        for (const auto& entry : std::filesystem::directory_iterator(dir_, ec)) {
+            auto name = entry.path().filename().string();
+            if (name.rfind(prefix, 0) == 0) {
+                auto sz = std::filesystem::file_size(entry.path(), ec);
+                if (!ec) out_bytes += sz;
+            }
+        }
     }
 
     MergeStats stats;
@@ -481,7 +513,7 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
 // ─────────────────────────────────────────────────────────────────────────────
 
 void SegmentMerger::deleteSegmentFiles(uint32_t seg_id) {
-    // 删除固定扩展名文件
+    // 删除共享文件（legacy 或 per-field 共享）
     for (const auto& ext : {"si","tim","doc","pos","fdt","fdx","liv","pay","nvm","nvd"}) {
         std::error_code ec;
         auto p = segPath(seg_id, ext);
@@ -490,14 +522,18 @@ void SegmentMerger::deleteSegmentFiles(uint32_t seg_id) {
             if (!ec) std::cout << "[Merger] Removed " << p << "\n";
         }
     }
-    // 删除所有 _N.ff_* 文件（字段名由 Schema 决定，用通配扫描）
-    std::string prefix = "_" + std::to_string(seg_id) + ".ff_";
+    // 删除所有 _N.<ext>_<field> 文件（tim_*, doc_*, pos_*, ff_* 等）
+    std::string seg_prefix = "_" + std::to_string(seg_id) + ".";
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator(dir_, ec)) {
         auto name = entry.path().filename().string();
-        if (name.rfind(prefix, 0) == 0) {
-            std::filesystem::remove(entry.path(), ec);
-            if (!ec) std::cout << "[Merger] Removed " << entry.path().string() << "\n";
+        if (name.rfind(seg_prefix, 0) == 0) {
+            // 只删除含下划线后缀的文件（即 per-field 格式：.tim_title, .ff_pubtime …）
+            auto rest = name.substr(seg_prefix.size());
+            if (rest.find('_') != std::string::npos) {
+                std::filesystem::remove(entry.path(), ec);
+                if (!ec) std::cout << "[Merger] Removed " << entry.path().string() << "\n";
+            }
         }
     }
 }
@@ -540,6 +576,11 @@ void SegmentMerger::printStats() const {
 
 std::string SegmentMerger::segPath(uint32_t seg_id, const std::string& ext) const {
     return dir_ + "/_" + std::to_string(seg_id) + "." + ext;
+}
+
+std::string SegmentMerger::segFieldPath(uint32_t seg_id, const std::string& field,
+                                         const std::string& ext) const {
+    return dir_ + "/_" + std::to_string(seg_id) + "." + ext + "_" + field;
 }
 
 } // namespace ii

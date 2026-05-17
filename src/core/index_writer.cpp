@@ -18,9 +18,8 @@ IndexWriter::IndexWriter(const std::string& dir, float ram_buffer_mb, Schema sch
 }
 
 IndexWriter::~IndexWriter() {
-    if (mem_index_.termCount() > 0) {
-        flush();
-    }
+    for (const auto& [_, idx] : field_indexes_)
+        if (idx.termCount() > 0) { flush(); break; }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -39,8 +38,10 @@ void IndexWriter::addDocument(const Document& doc) {
         token_buf.clear();
         field_pos_base = desc->buildTokensDoc(doc.doc_id, doc.fields,
                                                field_pos_base, analyzer_, token_buf);
-        total_tokens_ += token_buf.size();
-        for (auto& tok : token_buf) mem_index_.addToken(tok);
+        for (auto& tok : token_buf) {
+            field_token_counts_[tok.field]++;
+            field_indexes_[tok.field].addToken(tok);
+        }
 
         // FastField 写入（定长字段始终写以保持数组对齐，缺失时写默认 0）
         auto it = doc.fields.find(desc->name());
@@ -61,7 +62,7 @@ void IndexWriter::addDocument(const Document& doc) {
     }
     stored_docs_buf_.push_back(std::move(sd));
 
-    mem_index_.setDocCount(total_docs_);
+    for (auto& [_, idx] : field_indexes_) idx.setDocCount(total_docs_);
 
     if (estimateRamUsage() > static_cast<size_t>(ram_buffer_mb_ * 1024 * 1024)) {
         std::cout << "[IndexWriter] RAM buffer full, auto-flushing...\n";
@@ -74,16 +75,22 @@ void IndexWriter::addDocument(const Document& doc) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void IndexWriter::flush() {
-    if (mem_index_.termCount() == 0) return;
+    bool any_data = false;
+    for (const auto& [_, idx] : field_indexes_)
+        if (idx.termCount() > 0) { any_data = true; break; }
+    if (!any_data) return;
 
-    float avg_doc_len = (total_docs_ > 0)
-        ? static_cast<float>(total_tokens_) / static_cast<float>(total_docs_)
-        : 0.0f;
+    // per-field avg_doc_len
+    std::map<std::string, float> field_avg_doc_lens;
+    for (const auto& [field, cnt] : field_token_counts_) {
+        field_avg_doc_lens[field] = total_docs_ > 0
+            ? static_cast<float>(cnt) / static_cast<float>(total_docs_) : 0.f;
+    }
 
+    uint32_t n_docs = static_cast<uint32_t>(stored_docs_buf_.size());
     SegmentWriter seg_writer(dir_, next_seg_id_);
-    auto seg_stats = seg_writer.flush(mem_index_, stored_docs_buf_,
-                                      static_cast<uint32_t>(stored_docs_buf_.size()),
-                                      avg_doc_len);
+    auto seg_stats = seg_writer.flush(field_indexes_, stored_docs_buf_,
+                                      n_docs, field_avg_doc_lens, schema_);
 
     auto ff_stats = ff_writer_.flush(dir_, next_seg_id_);
 
@@ -93,10 +100,10 @@ void IndexWriter::flush() {
     ff_stats_history_.push_back(ff_stats);
 
     ++next_seg_id_;
-    mem_index_ = InMemoryIndex();
+    field_indexes_.clear();
+    field_token_counts_.clear();
     stored_docs_buf_.clear();
     ff_writer_.clear();
-    total_tokens_ = 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,10 +191,11 @@ void IndexWriter::commit() {
 
 size_t IndexWriter::estimateRamUsage() const {
     size_t estimate = 0;
-    auto terms = mem_index_.sortedTerms();
-    for (const auto& t : terms) {
-        const PostingList* pl = mem_index_.getPostingList(t);
-        if (pl) estimate += t.size() + pl->size() * 32;
+    for (const auto& [_, idx] : field_indexes_) {
+        for (const auto& t : idx.sortedTerms()) {
+            const PostingList* pl = idx.getPostingList(t);
+            if (pl) estimate += t.size() + pl->size() * 32;
+        }
     }
     for (const auto& sd : stored_docs_buf_) {
         for (const auto& [k, v] : sd.str_fields)
