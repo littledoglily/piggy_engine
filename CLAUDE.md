@@ -21,15 +21,16 @@ cmake --build build --target wiki_indexer
 
 ```bash
 # 运行所有模块测试（每个测试独立可执行）
-./build/test_all               # 集成测试（Analyzer + PForDelta + Merger + Searcher）
+./build/test_all                 # 集成测试（Analyzer + PForDelta + Merger + Searcher）
 ./build/test_analyzer
 ./build/test_pfor_delta
 ./build/test_skiplist
 ./build/test_posting_list
-./build/test_posting_iterator  # PostingIterator 惰性迭代器
+./build/test_posting_iterator    # PostingIterator 惰性迭代器
 ./build/test_merger
 ./build/test_fast_field
 ./build/test_schema
+./build/test_per_field_index     # per-field 倒排索引端到端测试（Step 8）
 
 # 运行 Demo（256 篇文档写入 + 多种查询展示）
 ./build/demo
@@ -54,11 +55,22 @@ FAIL(msg);   // assert(false) + 打印原因
 # 交互式检索
 ./build/wiki_searcher --index ./wiki_index --mode OR --top 10
 
-# 单次查询
+# 单次查询（裸词）
 ./build/wiki_searcher --index ./wiki_index --query "machine learning" --mode AND --top 5
+
+# 单次查询（field:term 语法，只检索 body 字段）
+./build/wiki_searcher --index ./wiki_index --query "body:neural network" --mode OR --top 5
+
+# 混合查询（field:term + 裸词）
+./build/wiki_searcher --index ./wiki_index --query "body:python language" --mode AND --top 5
 ```
 
 `wiki_indexer` Schema 加载优先级：`--schema 文件` → 输出目录中的 `schema.json`（续建） → `defaultSchema()`。
+
+**查询语法（`wiki_searcher` / `IndexSearcher`）：**
+- 裸词（`python`）：OR 模式 → 任意字段命中；AND 模式 → 所有索引字段都必须包含
+- `field:term`（`body:python`）：只在指定字段的 term 空间搜索，与模式无关
+- 混用：`"body:python language"` → `body:python` 限定字段，`language` 展开到所有字段
 
 ---
 
@@ -100,15 +112,18 @@ IndexSearcher
 **Segment 文件集（每个 Segment 前缀 `_N`）：**
 
 ```
-_N.tim   Term 词典（全量加载内存）：term → df/ttf/UB/offset
-_N.doc   Posting List：SkipList 序列化 + PForDelta Block
-_N.pos   位置信息：(doc_id, tf, positions[])
+per-field 格式（当前默认，Step 4 后所有新 Segment）：
+_N.tim_<field>   字段词典：term → df/ttf/UB/posting_offset/skip_offset/pos_offset
+_N.doc_<field>   字段 Posting List：SkipList + PForDelta Block
+_N.pos_<field>   字段位置信息（仅 FreqsPositions；FreqsOnly 字段无此文件）
+_N.ff_<field>    FastField 列存（仅 fast:true 字段）
+
+共享文件（与字段无关）：
 _N.fdt   文档原文：4B doc_id | 8B ext_id | 4B field_count | (str name | str value) × N
 _N.fdx   文档索引：doc_id → fdt 字节偏移
 _N.liv   存活位图：软删除标记
-_N.si    Segment 元数据
-_N.ff_<field>  FastField 列存：定长二进制数组（int64×8B 或 float×4B）
-schema.json    索引级 Schema，存于索引根目录
+_N.si    Segment 元数据（含 indexed_fields 字段列表）
+schema.json  索引级 Schema（存于索引根目录）
 ```
 
 ---
@@ -546,6 +561,8 @@ class IndexSearcher {
 
 ## 当前实现状态
 
+### 核心索引
+
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | Schema 结构 + JSON 持久化 | ✅ | `fieldTypeToStr/FromStr` 覆盖所有类型 |
@@ -555,20 +572,34 @@ class IndexSearcher {
 | FastField 泛化（按 Schema 字段名） | ✅ | 任意字段名列存；`FastFieldReader::getInt64/getFloat32(name, idx)` |
 | VarMultiField（`multi:true`） | ✅ | `vector<string>` 多值；`buildDescriptors()` 路由 |
 | CombinedField 虚拟字段 | ✅ | `sources` 联合分词；`buildTokensDoc()` 重载 |
-| PostingIterator 惰性迭代器 | ✅ | `postingIterator(term)` 独立文件句柄，支持 AND zigzag |
-| term 字段前缀（`title:python`） | ✅ | IndexSearcher 支持 `field:query` 语法（parseQuery + FieldTerm） |
-| avg_doc_len 按字段独立统计 | ✅ | `field_avg_doc_lens_` 从 .tim_<field> 派生，BM25 per-field 打分 |
-| IndexSearcher `field:query` 语法 | ✅ | `parseQuery`/`computeFieldTermIdfs`/`scoreDoc` 全部实现 |
-| Merge 时重算 IDF/UB | ⬜ | 当前 merge 复用各 Segment 的近似 UB |
+
+### Per-Field 倒排索引（design/per_field_inverted_index.md，Step 1–8 全部完成）
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| Token.field + InMemoryIndex per-field 路由 | ✅ | `field_indexes_[field]`；Token 携带字段名 |
+| SegmentWriter per-field 输出 | ✅ | `_N.tim_<field>` / `_N.doc_<field>` / `_N.pos_<field>`（FreqsPositions only）|
+| SegmentReader per-field API | ✅ | `getTermMeta(field,term)` / `postingIterator(field,term)` / `bm25Score(field,...)` |
+| avg_doc_len 按字段独立统计 | ✅ | `field_avg_doc_lens_` 从 `.tim_<field>` 派生，BM25 per-field 打分 |
+| SegmentMerger per-field 合并 | ✅ | 按字段独立多路归并，保留 per-field 文件；`deleteSegmentFiles` 清理 `_N.*_*` |
+| IndexSearcher `field:term` 语法 | ✅ | `parseQuery`/`computeFieldTermIdfs`/`scoreDoc` 全部实现 |
+| 裸词展开策略 | ✅ | AND：所有默认字段都必须命中；OR：任意字段命中即可 |
+| Backward compatibility | ✅ | 旧 Segment（`_N.tim` 无字段后缀）自动 legacy 模式；deprecated API 保留 |
+| legacy `readPostingList` per-field 路由修复 | ✅ | 通过 `postingIterator(field,term)` 路由，避免 shared ifstream 状态污染 |
+| test_per_field_index 端到端测试 | ✅ | 5 个测试覆盖写入/字段隔离/字段查询/合并/legacy 兼容 |
+| wiki_searcher help 说明 `field:term` | ✅ | `usage()` 和文件头注释均已更新 |
+| Merge 时 SkipNode.max_score 重算 | ⬜ | `doMerge` 已用最终 N 重算 IDF，但 SkipNode 内 max_score 未同步 |
 
 ---
 
 ## 待办（TODO）
 
 1. **BlockMaxWAND 真正消费**：`TermMeta::upper_bound` 和 `SkipNode::max_score` 已写入磁盘，但查询时尚未用于 Block 级剪枝（实现后可跳过 90%+ 无效 Block）。
-4. **Posting List 惰性迭代器扩展**：`PostingIterator` 已支持 AND，WAND OR 路径仍用全量解压；可扩展为 block-level seek。
-5. **Merge 时重算 IDF/UB**：`SegmentMerger::doMerge()` 已用最终 N 重算 IDF，但 SkipNode.max_score 未同步更新。
-6. **stored 字段支持数值类型**：`FixedField<T>::storeStr()` 当前返回空串，需要决策是否在 `.fdt` 存储数值的字符串表示。
+2. **Posting List 惰性迭代器扩展**：`PostingIterator` 已支持 AND，WAND OR 路径仍用全量解压；可扩展为 block-level seek。
+3. **Merge 时 SkipNode.max_score 重算**：`SegmentMerger::doMerge()` 已用最终 N 重算 IDF，但 SkipNode.max_score 未同步更新。
+4. **stored 字段支持数值类型**：`FixedField<T>::storeStr()` 当前返回空串，需要决策是否在 `.fdt` 存储数值的字符串表示。
+5. **字段 Boost**：`scoreDoc` 中各字段权重相等，可在 BM25 层引入 per-field boost 系数（title 命中得分 > body）。
+6. **WAND OR 路径迁移为 per-field 惰性迭代器**：当前 `searchOR_WAND` 仍通过 `postingIterator(field, term)` 惰性读取，可进一步实现 Block 级跳过以减少 I/O。
 
 ---
 
@@ -583,6 +614,10 @@ class IndexSearcher {
 **跨字段位置偏移（field_pos_base）：** `addDocument` 内跨字段累积位置基准，保证同一 doc 内所有字段的 token 位置全局单调递增。`CombinedField` 也参与此偏移链。修改 Schema 字段顺序会影响位置分布，索引需重建。
 
 **StoredDoc 多值字段分隔符：** `VarMultiField::storeStr()` 用 `\x1f`（Unit Separator）拼接多值，读取端需同样分割。当前 `StoredDocResult` 未提供自动分割的 accessor，调用方自行处理。
+
+**legacy `readPostingList(term)` 路由：** per-field 模式下，该接口通过 `postingIterator(field, term)` 内部实现，每次调用创建独立文件句柄。若调用频繁（如统计全量词项）性能略低于直接 per-field API，但避免了 shared `ifstream` 的 seek 状态污染（早期 bug 的根本原因）。
+
+**`term_dict_`（legacy 合并词典）的语义：** per-field 模式下 `term_dict_` 是跨字段 term 的合并视图；对同时出现在多个字段的 term，`posting_offset` 只保留第一个字段（按字段名字母序）的值，`doc_freq` 取最大值，`total_term_freq` 求和。该词典仅供 deprecated API 兼容，新代码请用 `fieldTermDict(field)` 或 `getTermMeta(field, term)`。
 
 ---
 
