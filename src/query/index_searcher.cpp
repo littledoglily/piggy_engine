@@ -265,8 +265,8 @@ std::vector<SearchResult> IndexSearcher::searchAND(
         r.doc_id  = did;
         r.score   = score;
         r.ext_id  = stored.ext_id;
-        r.source  = stored.source;
-        r.title   = stored.title;
+        r.source  = stored.source();
+        r.title   = stored.title();
         r.pubtime = seg.ffPubtime(static_cast<uint32_t>(did) - 1);
         r.uid     = seg.ffUid(static_cast<uint32_t>(did) - 1);
         results.push_back(r);
@@ -415,8 +415,8 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
         r.doc_id  = e.doc_id;
         r.score   = e.score;
         r.ext_id  = stored.ext_id;
-        r.source  = stored.source;
-        r.title   = stored.title;
+        r.source  = stored.source();
+        r.title   = stored.title();
         r.pubtime = seg.ffPubtime(static_cast<uint32_t>(e.doc_id) - 1);
         r.uid     = seg.ffUid(static_cast<uint32_t>(e.doc_id) - 1);
         results.push_back(r);

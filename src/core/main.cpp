@@ -95,10 +95,10 @@ static std::vector<ii::Document> buildDocuments() {
 
         ii::Document doc;
         doc.doc_id    = next_id;
-        doc.title     = title;
-        doc.body      = body;
-        doc.category  = cat.name;
-        doc.page_rank = 0.1f + (float)(i % 10) * 0.05f;
+        doc.set("title", title);
+        doc.set("body", body);
+        doc.set("category", cat.name);
+        doc.set("page_rank", 0.1f + (float)(i % 10) * 0.05f);
 
         docs.push_back(std::move(doc));
     }

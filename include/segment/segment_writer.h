@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <cstdint>
 
 namespace ii {
@@ -71,13 +72,11 @@ struct SegmentInfo {
 };
 
 // ── 文档存储条目（写入 .fdt/.fdx）────────────────────────────────────────────
+// 格式：4B doc_id | 8B ext_id | 4B field_count | (str name | str value) × N
 struct StoredDoc {
     DocId       doc_id  = 0;
-    uint64_t    ext_id  = 0;     // 外部数字 ID
-    std::string source;          // 外部字符串标识（URL / ISBN / 路径等）
-    std::string title;
-    std::string body;
-    std::string category;
+    uint64_t    ext_id  = 0;
+    std::unordered_map<std::string, std::string> str_fields;
 };
 
 class SegmentWriter {

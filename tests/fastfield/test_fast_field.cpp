@@ -158,20 +158,20 @@ void test_index_writer_integration() {
         ii::IndexWriter iw(dir, 1.0f);
         ii::Document d;
         d.doc_id    = 1;
-        d.title     = "apple fruit";
-        d.body      = "apple is a fruit";
-        d.category  = "food";
-        d.pubtime   = 20240101LL;
-        d.uid       = 42LL;
-        d.page_rank = 0.8f;
+        d.set("title", "apple fruit");
+        d.set("body", "apple is a fruit");
+        d.set("category", "food");
+        d.set("pubtime", 20240101LL);
+        d.set("uid", 42LL);
+        d.set("page_rank", 0.8f);
         iw.addDocument(d);
 
         d.doc_id    = 2;
-        d.title     = "banana fruit";
-        d.body      = "banana is yellow";
-        d.pubtime   = 20240201LL;
-        d.uid       = 99LL;
-        d.page_rank = 0.5f;
+        d.set("title", "banana fruit");
+        d.set("body", "banana is yellow");
+        d.set("pubtime", 20240201LL);
+        d.set("uid", 99LL);
+        d.set("page_rank", 0.5f);
         iw.addDocument(d);
 
         iw.commit();
@@ -204,11 +204,11 @@ void test_searcher_with_filter() {
         for (int i = 1; i <= 5; ++i) {
             ii::Document d;
             d.doc_id    = (ii::DocId)i;
-            d.title     = "fruit food";
-            d.body      = "fruit is good food";
-            d.pubtime   = 20240100LL + i;   // 20240101 ~ 20240105
-            d.uid       = (int64_t)(i * 10);
-            d.page_rank = 0.1f * (float)i;
+            d.set("title", "fruit food");
+            d.set("body", "fruit is good food");
+            d.set("pubtime", 20240100LL + i);   // 20240101 ~ 20240105
+            d.set("uid", (int64_t)(i * 10));
+            d.set("page_rank", 0.1f * (float)i);
             iw.addDocument(d);
         }
         iw.commit();

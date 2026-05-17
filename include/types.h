@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <variant>
+#include <unordered_map>
 
 namespace ii {
 
@@ -17,6 +19,12 @@ using TermFreq= uint32_t;   // term 在 doc 中出现次数
 using Pos     = uint32_t;   // term 在 doc 中的词序位置
 
 static constexpr DocId INVALID_DOC = 0xFFFFFFFFu;
+
+// ── FieldVal：字段值的通用变体类型 ───────────────────────────────────────────
+// 定长单值：int64_t（Int64 字段）、float（Float32 字段）
+// 变长单值：std::string（Text / Keyword / Stored 字段）
+// 变长多值：std::vector<std::string>（多值 Keyword / Tag 字段）
+using FieldVal = std::variant<std::string, int64_t, float, std::vector<std::string>>;
 
 // ── Token：分词器输出的最小单元 ───────────────────────────────────────────────
 struct Token {
@@ -52,25 +60,57 @@ struct TermMeta {
     float     upper_bound;      // UB：该 term 最大 BM25 贡献分（WAND 剪枝）
 };
 
-// ── Document：写入索引的原始文档 ────────────────────────────────────────────
+// ── Document：写入索引的原始文档 ─────────────────────────────────────────────
+// doc_id / ext_id 是引擎保留的身份字段；业务字段通过 fields map 统一管理，
+// 使用 set() 赋值，getString() / getInt64() / getFloat() 读取。
 struct Document {
-    // ── 标识符 ───────────────────────────────────────────────────────────────
-    DocId       doc_id   = 0;     // 引擎内部顺序 ID（Segment 局部，1-indexed）
-    uint64_t    ext_id   = 0;     // 外部数字 ID（wiki page id / ISBN number / URL hash 等）
-    std::string source;           // 外部字符串标识（URL / DOI / ISBN / 文件路径等）
+    DocId    doc_id = 0;   // 引擎内部顺序 ID（Segment 局部，1-indexed）
+    uint64_t ext_id = 0;   // 外部数字 ID（wiki page id / ISBN / URL hash 等）
 
-    // ── 正文字段 ─────────────────────────────────────────────────────────────
-    std::string title;
-    std::string body;
-    std::string category;
+    std::unordered_map<std::string, FieldVal> fields;
 
-    // ── 数值字段（FastField）─────────────────────────────────────────────────
-    float       page_rank = 0.0f;
-    int64_t     pubtime   = 0;    // Unix 时间戳，用于范围过滤 + 排序
-    int64_t     uid       = 0;    // 用户 ID，用于等值过滤
+    // ── 赋值接口（支持链式调用）──────────────────────────────────────────────
+    Document& set(const std::string& name, std::string v) {
+        fields[name] = std::move(v); return *this;
+    }
+    Document& set(const std::string& name, int64_t v) {
+        fields[name] = v; return *this;
+    }
+    Document& set(const std::string& name, float v) {
+        fields[name] = v; return *this;
+    }
+    Document& set(const std::string& name, std::vector<std::string> v) {
+        fields[name] = std::move(v); return *this;
+    }
+
+    // ── 读取接口 ─────────────────────────────────────────────────────────────
+    const std::string& getString(const std::string& name) const {
+        static const std::string kEmpty;
+        auto it = fields.find(name);
+        if (it == fields.end()) return kEmpty;
+        const std::string* p = std::get_if<std::string>(&it->second);
+        return p ? *p : kEmpty;
+    }
+    int64_t getInt64(const std::string& name, int64_t def = 0) const {
+        auto it = fields.find(name);
+        if (it == fields.end()) return def;
+        const int64_t* p = std::get_if<int64_t>(&it->second);
+        return p ? *p : def;
+    }
+    float getFloat(const std::string& name, float def = 0.0f) const {
+        auto it = fields.find(name);
+        if (it == fields.end()) return def;
+        const float* p = std::get_if<float>(&it->second);
+        return p ? *p : def;
+    }
+    const std::vector<std::string>* getStrList(const std::string& name) const {
+        auto it = fields.find(name);
+        if (it == fields.end()) return nullptr;
+        return std::get_if<std::vector<std::string>>(&it->second);
+    }
 };
 
-// ── FastFieldDoc：数值列存缓冲（与 StoredDoc 并行，同 flush）────────────────
+// ── FastFieldDoc：向后兼容，供 FastFieldWriter::add() 直接调用 ───────────────
 struct FastFieldDoc {
     int64_t pubtime   = 0;
     int64_t uid       = 0;
@@ -95,11 +135,16 @@ struct NumericFilter {
 struct SearchResult {
     DocId       doc_id  = 0;
     float       score   = 0.0f;
-    uint64_t    ext_id  = 0;     // 外部数字 ID（原样从 .fdt 取回）
-    std::string source;          // 外部字符串标识（URL 等，从 .fdt 取回）
-    std::string title;
+    uint64_t    ext_id  = 0;
     int64_t     pubtime = 0;
     int64_t     uid     = 0;
+
+    // 向后兼容的命名字段（同时也写入 stored_fields）
+    std::string source;
+    std::string title;
+
+    // 所有 stored:true 字段的通用 map（含 source / title）
+    std::unordered_map<std::string, std::string> stored_fields;
 };
 
 } // namespace ii

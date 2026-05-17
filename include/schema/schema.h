@@ -17,7 +17,8 @@ enum class FieldType {
     Text,     // 经过 Analyzer 分词；支持 index / stored
     Keyword,  // 不分词，整体作为单个 term；支持 index / stored
     Int64,    // 64-bit 整数；支持 fast / stored
-    Float32   // 32-bit 浮点；支持 fast / stored
+    Float32,  // 32-bit 浮点；支持 fast / stored
+    Combined  // 虚拟字段：联合多个源字段分词建倒排，不 stored / fast
 };
 
 // ── 倒排索引精度（对标 Lucene IndexOptions）───────────────────────────────────
@@ -33,9 +34,11 @@ enum class IndexOption {
 struct FieldSchema {
     std::string name;
     FieldType   type;
-    IndexOption index  = IndexOption::None;
-    bool        stored = false;  // true → 写入 .fdt，可从结果取回
-    bool        fast   = false;  // true → 写入 .ff_<name>，支持过滤 / 排序
+    IndexOption index   = IndexOption::None;
+    bool        stored  = false;   // true → 写入 .fdt，可从结果取回
+    bool        fast    = false;   // true → 写入 .ff_<name>，支持过滤 / 排序
+    bool        multi   = false;   // true → 字段值为 vector<string>（多值）
+    std::vector<std::string> sources;  // Combined 字段的源字段列表
 };
 
 // ── Index 级别 Schema（不可变）────────────────────────────────────────────────

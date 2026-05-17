@@ -333,10 +333,13 @@ SegmentReader::StoredDocResult SegmentReader::readStoredDoc(DocId doc_id) const 
         return s;
     };
 
-    r.source   = readStr();
-    r.title    = readStr();
-    r.body     = readStr();
-    r.category = readStr();
+    uint32_t field_count = 0;
+    fdt_file_.read(reinterpret_cast<char*>(&field_count), 4);
+    for (uint32_t i = 0; i < field_count; ++i) {
+        std::string name  = readStr();
+        std::string value = readStr();
+        r.str_fields[std::move(name)] = std::move(value);
+    }
     return r;
 }
 

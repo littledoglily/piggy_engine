@@ -9,9 +9,10 @@ namespace ii {
 
 IndexWriter::IndexWriter(const std::string& dir, float ram_buffer_mb, Schema schema)
     : dir_(dir), ram_buffer_mb_(ram_buffer_mb), schema_(std::move(schema))
+    , descriptors_(buildDescriptors(schema_))
 {
     std::filesystem::create_directories(dir_);
-    schema_.save(dir_);   // 持久化 schema.json
+    schema_.save(dir_);
     std::cout << "[IndexWriter] Initialized. Dir=" << dir_
               << " RamBuffer=" << ram_buffer_mb_ << "MB\n";
 }
@@ -23,90 +24,41 @@ IndexWriter::~IndexWriter() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 字段名 → Document 具名字段的桥接（向后兼容，Step 6 改为 map 后可删除）
-// ─────────────────────────────────────────────────────────────────────────────
-
-std::string IndexWriter::getDocText(const Document& doc, const std::string& name) {
-    if (name == "title")    return doc.title;
-    if (name == "body")     return doc.body;
-    if (name == "category") return doc.category;
-    if (name == "source")   return doc.source;
-    return "";
-}
-
-int64_t IndexWriter::getDocInt64(const Document& doc, const std::string& name) {
-    if (name == "pubtime") return doc.pubtime;
-    if (name == "uid")     return doc.uid;
-    return 0;
-}
-
-float IndexWriter::getDocFloat32(const Document& doc, const std::string& name) {
-    if (name == "page_rank") return doc.page_rank;
-    return 0.0f;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // addDocument：按 Schema 路由各字段
 // ─────────────────────────────────────────────────────────────────────────────
 
 void IndexWriter::addDocument(const Document& doc) {
     ++total_docs_;
 
-    // ── 按 Schema 路由 ────────────────────────────────────────────────────────
-    // 跨 Text 字段累积位置偏移，保证同一 doc 所有字段 token 位置单调递增
-    // TODO: 后续不同field的索引要带字段名, 主要针对text类型索引，后续想要只在TEXT字段检索不支持
+    // 跨字段累积位置偏移，保证同一 doc 所有字段 token 位置单调递增
     uint32_t field_pos_base = 0;
+    std::vector<Token> token_buf;
 
-    for (const auto& fs : schema_.fields) {
+    for (const auto& desc : descriptors_) {
+        // 建倒排：文档级入口（CombinedField 联合多源，普通字段按名查找单值）
+        token_buf.clear();
+        field_pos_base = desc->buildTokensDoc(doc.doc_id, doc.fields,
+                                               field_pos_base, analyzer_, token_buf);
+        total_tokens_ += token_buf.size();
+        for (auto& tok : token_buf) mem_index_.addToken(tok);
 
-        if (fs.type == FieldType::Text || fs.type == FieldType::Keyword) {
-            std::string val = getDocText(doc, fs.name);
-
-            // 建倒排
-            if (fs.index != IndexOption::None && !val.empty()) {
-                if (fs.type == FieldType::Text) {
-                    auto tokens = analyzer_.analyze(doc.doc_id, val);
-                    total_tokens_ += tokens.size();
-                    uint32_t max_pos = field_pos_base;
-                    for (auto& tok : tokens) {
-                        tok.position += field_pos_base;
-                        if (tok.position > max_pos) max_pos = tok.position;
-                        mem_index_.addToken(tok);
-                    }
-                    field_pos_base = max_pos + 1;
-                } else {
-                    // Keyword：整体作为一个 term
-                    Token tok;
-                    tok.term      = val;
-                    tok.doc_id    = doc.doc_id;
-                    tok.position  = field_pos_base++;
-                    tok.start_off = 0;
-                    tok.end_off   = static_cast<uint32_t>(val.size());
-                    mem_index_.addToken(tok);
-                }
-            }
-
-        } else if (fs.type == FieldType::Int64) {
-            if (fs.fast) {
-                ff_writer_.addInt64(fs.name, getDocInt64(doc, fs.name));
-            }
-
-        } else if (fs.type == FieldType::Float32) {
-            if (fs.fast) {
-                ff_writer_.addFloat32(fs.name, getDocFloat32(doc, fs.name));
-            }
-        }
+        // FastField 写入（定长字段始终写以保持数组对齐，缺失时写默认 0）
+        auto it = doc.fields.find(desc->name());
+        const FieldVal* val = (it != doc.fields.end()) ? &it->second : nullptr;
+        desc->writeFast(val, ff_writer_);
     }
 
-    // ── 原文存储（按 schema 中 stored=true 的字段组装 StoredDoc）────────────
-    // StoredDoc 保持当前格式不变（Step 6 再泛化）
+    // ── StoredDoc 组装（按描述符泛化）──────────────────────────────────────
     StoredDoc sd;
-    sd.doc_id   = doc.doc_id;
-    sd.ext_id   = doc.ext_id;
-    sd.source   = doc.source;
-    sd.title    = doc.title;
-    sd.body     = doc.body;
-    sd.category = doc.category;
+    sd.doc_id = doc.doc_id;
+    sd.ext_id = doc.ext_id;
+    for (const auto& desc : descriptors_) {
+        if (!desc->isStored()) continue;
+        auto it = doc.fields.find(desc->name());
+        const FieldVal* val = (it != doc.fields.end()) ? &it->second : nullptr;
+        std::string s = desc->storeStr(val);
+        if (!s.empty()) sd.str_fields[desc->name()] = std::move(s);
+    }
     stored_docs_buf_.push_back(std::move(sd));
 
     mem_index_.setDocCount(total_docs_);
@@ -148,7 +100,7 @@ void IndexWriter::flush() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// printFlushStats：格式化打印 segment 构建统计
+// printFlushStats
 // ─────────────────────────────────────────────────────────────────────────────
 
 void IndexWriter::printFlushStats(const SegmentWriteStats& seg,
@@ -238,7 +190,9 @@ size_t IndexWriter::estimateRamUsage() const {
         if (pl) estimate += t.size() + pl->size() * 32;
     }
     for (const auto& sd : stored_docs_buf_) {
-        estimate += sd.title.size() + sd.body.size() + sd.category.size() + 16;
+        for (const auto& [k, v] : sd.str_fields)
+            estimate += k.size() + v.size();
+        estimate += 16;
     }
     return estimate;
 }

@@ -362,11 +362,11 @@ void SegmentWriter::writePos(
 //
 // 格式（每篇文档）：
 //   4B  doc_id (uint32)
-//   8B  ext_id (uint64)   外部数字 ID
-//   [str] source          外部字符串标识
-//   [str] title
-//   [str] body
-//   [str] category
+//   8B  ext_id (uint64)
+//   4B  field_count
+//   for each field:
+//     [str] field_name
+//     [str] field_value
 // ─────────────────────────────────────────────────────────────────────────────
 
 void SegmentWriter::writeFdt(
@@ -381,10 +381,11 @@ void SegmentWriter::writeFdt(
         offsets_out[i] = static_cast<uint64_t>(f.tellp());
         writeU32(f, docs[i].doc_id);
         writeU64(f, docs[i].ext_id);
-        writeStr(f, docs[i].source);
-        writeStr(f, docs[i].title);
-        writeStr(f, docs[i].body);
-        writeStr(f, docs[i].category);
+        writeU32(f, static_cast<uint32_t>(docs[i].str_fields.size()));
+        for (const auto& [name, val] : docs[i].str_fields) {
+            writeStr(f, name);
+            writeStr(f, val);
+        }
     }
 }
 

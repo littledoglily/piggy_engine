@@ -19,6 +19,7 @@
 #include <fstream>
 #include <bitset>
 #include <memory>
+#include <functional>
 
 namespace ii {
 
@@ -53,10 +54,19 @@ public:
     struct StoredDocResult {
         DocId       doc_id = 0;
         uint64_t    ext_id = 0;
-        std::string source;
-        std::string title;
-        std::string body;
-        std::string category;
+        std::unordered_map<std::string, std::string> str_fields;
+
+        // 向后兼容访问器
+        const std::string& source()   const { return get("source"); }
+        const std::string& title()    const { return get("title"); }
+        const std::string& body()     const { return get("body"); }
+        const std::string& category() const { return get("category"); }
+
+        const std::string& get(const std::string& k) const {
+            static const std::string empty;
+            auto it = str_fields.find(k);
+            return it != str_fields.end() ? it->second : empty;
+        }
     };
     StoredDocResult readStoredDoc(DocId doc_id) const;
 

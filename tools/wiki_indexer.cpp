@@ -129,7 +129,7 @@ static std::string wikiJsonKey(const std::string& field_name) {
     return field_name;
 }
 
-// 按 Schema 逐字段从 JSON 行提取值并填充 Document
+// 按 Schema 逐字段从 JSON 行提取值并填充 Document（Schema 驱动，无硬编码字段名）
 static void populateDocument(ii::Document& doc,
                               const std::string& line,
                               const ii::Schema&  schema)
@@ -139,19 +139,13 @@ static void populateDocument(ii::Document& doc,
 
         if (fs.type == ii::FieldType::Text || fs.type == ii::FieldType::Keyword) {
             std::string val = extractJsonString(line, jkey);
-            if      (fs.name == "title")    doc.title    = std::move(val);
-            else if (fs.name == "body")     doc.body     = std::move(val);
-            else if (fs.name == "category") doc.category = std::move(val);
-            else if (fs.name == "source")   doc.source   = std::move(val);
+            if (!val.empty()) doc.set(fs.name, std::move(val));
 
         } else if (fs.type == ii::FieldType::Int64) {
-            int64_t val = extractJsonInt64(line, jkey);
-            if      (fs.name == "pubtime") doc.pubtime = val;
-            else if (fs.name == "uid")     doc.uid     = val;
+            doc.set(fs.name, extractJsonInt64(line, jkey));
 
         } else if (fs.type == ii::FieldType::Float32) {
-            float val = extractJsonFloat32(line, jkey);
-            if (fs.name == "page_rank") doc.page_rank = val;
+            doc.set(fs.name, extractJsonFloat32(line, jkey));
         }
     }
 }

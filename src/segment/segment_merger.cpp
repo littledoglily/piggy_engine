@@ -151,8 +151,7 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         uint32_t    seg_id;
         DocId       orig_doc_id;
         uint64_t    ext_id = 0;
-        std::string source;
-        std::string title, body, category;
+        std::unordered_map<std::string, std::string> str_fields;
     };
     std::vector<GlobalDoc> alive_docs;
 
@@ -188,10 +187,7 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
             gd.seg_id      = sid;
             gd.orig_doc_id = stored.doc_id;
             gd.ext_id      = stored.ext_id;
-            gd.source      = stored.source;
-            gd.title       = stored.title;
-            gd.body        = stored.body;
-            gd.category    = stored.category;
+            gd.str_fields  = stored.str_fields;
             alive_docs.push_back(std::move(gd));
             ++new_id;
         }
@@ -375,10 +371,11 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
             DocId new_doc_id = remap[((uint64_t)gd.seg_id << 20) | gd.orig_doc_id];
             wU32(ffdt, new_doc_id);
             wU64(ffdt, gd.ext_id);
-            wStr(ffdt, gd.source);
-            wStr(ffdt, gd.title);
-            wStr(ffdt, gd.body);
-            wStr(ffdt, gd.category);
+            wU32(ffdt, (uint32_t)gd.str_fields.size());
+            for (const auto& [name, val] : gd.str_fields) {
+                wStr(ffdt, name);
+                wStr(ffdt, val);
+            }
         }
     }
     {

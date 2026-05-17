@@ -11,6 +11,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "types.h"
 #include "schema/schema.h"
+#include "schema/field_descriptor.h"
 #include "tokenizer/analyzer.h"
 #include "postings/posting_list.h"
 #include "segment/segment_writer.h"
@@ -42,14 +43,10 @@ private:
     static void printFlushStats(const SegmentWriteStats& seg,
                                 const FFWriteStats&      ff);
 
-    // 从 Document 按字段名取值（过渡桥接，保持 Document 为具名结构体）
-    static std::string getDocText  (const Document& doc, const std::string& name);
-    static int64_t     getDocInt64 (const Document& doc, const std::string& name);
-    static float       getDocFloat32(const Document& doc, const std::string& name);
-
     std::string   dir_;
     float         ram_buffer_mb_;
     Schema        schema_;
+    std::vector<std::unique_ptr<FieldDescriptor>> descriptors_;  // 从 schema_ 构建
 
     Analyzer      analyzer_;
     InMemoryIndex mem_index_;

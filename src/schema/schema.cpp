@@ -10,10 +10,11 @@ namespace ii {
 
 const char* fieldTypeToStr(FieldType t) {
     switch (t) {
-        case FieldType::Text:    return "text";
-        case FieldType::Keyword: return "keyword";
-        case FieldType::Int64:   return "int64";
-        case FieldType::Float32: return "float32";
+        case FieldType::Text:     return "text";
+        case FieldType::Keyword:  return "keyword";
+        case FieldType::Int64:    return "int64";
+        case FieldType::Float32:  return "float32";
+        case FieldType::Combined: return "combined";
     }
     return "text";
 }
@@ -29,9 +30,10 @@ const char* indexOptionToStr(IndexOption o) {
 }
 
 FieldType fieldTypeFromStr(const std::string& s) {
-    if (s == "keyword") return FieldType::Keyword;
-    if (s == "int64")   return FieldType::Int64;
-    if (s == "float32") return FieldType::Float32;
+    if (s == "keyword")  return FieldType::Keyword;
+    if (s == "int64")    return FieldType::Int64;
+    if (s == "float32")  return FieldType::Float32;
+    if (s == "combined") return FieldType::Combined;
     return FieldType::Text;
 }
 
@@ -90,8 +92,19 @@ void Schema::save(const std::string& index_dir) const {
         f << "      \"type\": \""   << fieldTypeToStr(fs.type)    << "\",\n";
         f << "      \"index\": \""  << indexOptionToStr(fs.index) << "\",\n";
         f << "      \"stored\": "   << (fs.stored ? "true" : "false") << ",\n";
-        f << "      \"fast\": "     << (fs.fast   ? "true" : "false") << "\n";
-        f << "    }";
+        f << "      \"fast\": "     << (fs.fast   ? "true" : "false");
+        if (fs.multi) {
+            f << ",\n      \"multi\": true";
+        }
+        if (!fs.sources.empty()) {
+            f << ",\n      \"sources\": [";
+            for (size_t j = 0; j < fs.sources.size(); ++j) {
+                if (j > 0) f << ",";
+                f << "\"" << fs.sources[j] << "\"";
+            }
+            f << "]";
+        }
+        f << "\n    }";
         if (i + 1 < fields.size()) f << ",";
         f << "\n";
     }
@@ -131,6 +144,26 @@ static bool parseKV(const std::string& line, std::string& key, std::string& val)
     return true;
 }
 
+// 从 "sources": ["a","b"] 的值部分（去掉键名和冒号后）提取字符串列表
+static std::vector<std::string> parseSources(const std::string& raw) {
+    std::vector<std::string> result;
+    size_t i = raw.find('[');
+    if (i == std::string::npos) return result;
+    size_t j = raw.find(']', i);
+    if (j == std::string::npos) return result;
+    std::string arr = raw.substr(i + 1, j - i - 1);
+    size_t pos = 0;
+    while (pos < arr.size()) {
+        size_t q1 = arr.find('"', pos);
+        if (q1 == std::string::npos) break;
+        size_t q2 = arr.find('"', q1 + 1);
+        if (q2 == std::string::npos) break;
+        result.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+        pos = q2 + 1;
+    }
+    return result;
+}
+
 Schema Schema::fromJson(const std::string& json_path) {
     std::ifstream f(json_path);
     if (!f) throw std::runtime_error("Cannot open schema.json: " + json_path);
@@ -147,7 +180,6 @@ Schema Schema::fromJson(const std::string& json_path) {
             if (c == '{') ++depth;
             else if (c == '}') {
                 if (depth == 2 && in_field) {
-                    // 结束一个 field 对象
                     schema.fields.push_back(current);
                     current = FieldSchema{};
                     in_field = false;
@@ -157,16 +189,17 @@ Schema Schema::fromJson(const std::string& json_path) {
         }
 
         if (depth == 2) {
-            // 进入 field 对象
             in_field = true;
             std::string key, val;
             if (!parseKV(line, key, val)) continue;
 
-            if (key == "name")   current.name   = val;
-            else if (key == "type")  current.type   = fieldTypeFromStr(val);
-            else if (key == "index") current.index  = indexOptionFromStr(val);
-            else if (key == "stored") current.stored = (val == "true");
-            else if (key == "fast")   current.fast   = (val == "true");
+            if      (key == "name")    current.name    = val;
+            else if (key == "type")    current.type    = fieldTypeFromStr(val);
+            else if (key == "index")   current.index   = indexOptionFromStr(val);
+            else if (key == "stored")  current.stored  = (val == "true");
+            else if (key == "fast")    current.fast    = (val == "true");
+            else if (key == "multi")   current.multi   = (val == "true");
+            else if (key == "sources") current.sources = parseSources(line);
         }
     }
 

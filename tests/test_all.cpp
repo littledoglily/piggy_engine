@@ -272,9 +272,9 @@ void test_soft_delete_and_merge() {
         for (int i = 1; i <= 10; ++i) {
             ii::Document doc;
             doc.doc_id   = i;
-            doc.title    = "Doc " + std::to_string(i);
-            doc.body     = "python tutorial data science machine learning " + std::to_string(i);
-            doc.category = "test";
+            doc.set("title", "Doc " + std::to_string(i));
+            doc.set("body", "python tutorial data science machine learning " + std::to_string(i));
+            doc.set("category", "test");
             writer.addDocument(doc);
         }
         writer.commit();
@@ -325,25 +325,25 @@ void test_merge_tf_and_positions() {
 
         ii::Document d1;
         d1.doc_id   = 1;
-        d1.title    = "Multi Python";
-        d1.body     = "python python python";
-        d1.category = "test";
+        d1.set("title", "Multi Python");
+        d1.set("body", "python python python");
+        d1.set("category", "test");
         writer.addDocument(d1);
 
         ii::Document d2;
         d2.doc_id   = 2;
-        d2.title    = "Single Python";
-        d2.body     = "python tutorial";
-        d2.category = "test";
+        d2.set("title", "Single Python");
+        d2.set("body", "python tutorial");
+        d2.set("category", "test");
         writer.addDocument(d2);
 
         writer.flush();  // → segment 0
 
         ii::Document d3;
         d3.doc_id   = 3;
-        d3.title    = "Double Python";
-        d3.body     = "python python guide";
-        d3.category = "test";
+        d3.set("title", "Double Python");
+        d3.set("body", "python python guide");
+        d3.set("category", "test");
         writer.addDocument(d3);
 
         writer.commit();  // → segment 1

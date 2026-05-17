@@ -64,8 +64,8 @@ void test_pi_sequential_next() {
         for (int i = 1; i <= 10; ++i) {
             Document doc;
             doc.doc_id = i;
-            doc.title  = "t" + std::to_string(i);
-            doc.body   = "mango fruit tropical";
+            doc.set("title", "t" + std::to_string(i));
+            doc.set("body", "mango fruit tropical");
             writer.addDocument(doc);
         }
         writer.commit();
@@ -101,8 +101,8 @@ void test_pi_advance_exact() {
         for (int i = 1; i <= 10; ++i) {
             Document doc;
             doc.doc_id = i;
-            doc.title  = "t" + std::to_string(i);
-            doc.body   = "mango fruit tropical";
+            doc.set("title", "t" + std::to_string(i));
+            doc.set("body", "mango fruit tropical");
             writer.addDocument(doc);
         }
         writer.commit();
@@ -153,8 +153,8 @@ void test_pi_advance_skip() {
         for (int i = 1; i <= 20; ++i) {
             Document doc;
             doc.doc_id = i;
-            doc.title  = "t" + std::to_string(i);
-            doc.body   = (i % 2 == 1) ? "lemon citrus" : "citrus";
+            doc.set("title", "t" + std::to_string(i));
+            doc.set("body", (i % 2 == 1) ? "lemon citrus" : "citrus");
             writer.addDocument(doc);
         }
         writer.commit();
@@ -211,8 +211,8 @@ void test_pi_advance_past_end() {
         for (int i = 1; i <= 5; ++i) {
             Document doc;
             doc.doc_id = i;
-            doc.title  = "t" + std::to_string(i);
-            doc.body   = "mango fruit";
+            doc.set("title", "t" + std::to_string(i));
+            doc.set("body", "mango fruit");
             writer.addDocument(doc);
         }
         writer.commit();
@@ -245,8 +245,8 @@ void test_pi_multi_block_advance() {
         for (int i = 1; i <= 300; ++i) {
             Document doc;
             doc.doc_id = i;
-            doc.title  = "t" + std::to_string(i);
-            doc.body   = "mango fruit";
+            doc.set("title", "t" + std::to_string(i));
+            doc.set("body", "mango fruit");
             writer.addDocument(doc);
         }
         writer.commit();
@@ -302,8 +302,8 @@ void test_pi_block_max_docid() {
         for (int i = 1; i <= 300; ++i) {
             Document doc;
             doc.doc_id = i;
-            doc.title  = "t" + std::to_string(i);
-            doc.body   = "mango fruit";
+            doc.set("title", "t" + std::to_string(i));
+            doc.set("body", "mango fruit");
             writer.addDocument(doc);
         }
         writer.commit();
@@ -347,8 +347,8 @@ void test_pi_next_and_advance_interleave() {
         for (int i = 1; i <= 300; ++i) {
             Document doc;
             doc.doc_id = i;
-            doc.title  = "t" + std::to_string(i);
-            doc.body   = "mango fruit";
+            doc.set("title", "t" + std::to_string(i));
+            doc.set("body", "mango fruit");
             writer.addDocument(doc);
         }
         writer.commit();
@@ -400,8 +400,8 @@ void test_pi_advance_consistency() {
         for (int i = 1; i <= 300; ++i) {
             Document doc;
             doc.doc_id = i;
-            doc.title  = "t" + std::to_string(i);
-            doc.body   = (i % 3 == 1) ? "mango fruit" : "fruit";
+            doc.set("title", "t" + std::to_string(i));
+            doc.set("body", (i % 3 == 1) ? "mango fruit" : "fruit");
             writer.addDocument(doc);
         }
         writer.commit();
