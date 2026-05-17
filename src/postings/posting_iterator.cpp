@@ -1,5 +1,6 @@
 #include "postings/posting_iterator.h"
 #include "postings/pfor_delta.h"
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
@@ -32,6 +33,23 @@ PostingIterator::PostingIterator(const TermMeta& meta, const std::string& doc_pa
     file_.seekg(static_cast<std::streamoff>(meta_.posting_offset));
 
     next();  // 推进到第一个 doc，构造后 docId() 即可用
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// scanBlock：在 cur_block_[cur_pos_..] 内二分查找第一个 >= target 的 doc
+// cur_block_ 存储升序 doc_id（delta 解压 + 前缀和还原），满足二分前提
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool PostingIterator::scanBlock(DocId target) {
+    auto begin = cur_block_.begin() + cur_pos_;
+    auto it    = std::lower_bound(begin, cur_block_.end(), target);
+    if (it == cur_block_.end()) {
+        cur_pos_ = cur_block_.size();  // 块内全部 < target，耗尽当前块
+        return false;
+    }
+    cur_doc_ = *it;
+    cur_pos_ = static_cast<size_t>(it - cur_block_.begin()) + 1;
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,12 +90,10 @@ bool PostingIterator::loadNextBlock() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool PostingIterator::next() {
-    // 当前 Block 还有剩余
     if (cur_pos_ < cur_block_.size()) {
         cur_doc_ = cur_block_[cur_pos_++];
         return true;
     }
-    // 加载下一个 Block
     if (!loadNextBlock()) return false;
     cur_doc_ = cur_block_[cur_pos_++];
     return true;
@@ -91,33 +107,22 @@ bool PostingIterator::advance(DocId target) {
     if (cur_doc_ == INVALID_DOC) return false;
     if (cur_doc_ >= target)      return true;
 
-    // 先在当前 Block 内线性扫描
-    while (cur_pos_ < cur_block_.size()) {
-        if (cur_block_[cur_pos_] >= target) {
-            cur_doc_ = cur_block_[cur_pos_++];
-            return true;
-        }
-        ++cur_pos_;
-    }
+    // 先在当前 Block 内二分查找
+    if (scanBlock(target)) return true;
 
     // 当前 Block 内找不到，用 SkipList 跳跃到正确的 Block
     return seekToBlock(target);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// seekToBlock：SkipList 跳跃 + 块内扫描
+// seekToBlock：SkipList 跳跃 + 块内二分扫描
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool PostingIterator::seekToBlock(DocId target) {
     // 没有 SkipList（整个 posting 只有 1 个 Block），顺序加载剩余 Block
     if (skip_list_.empty()) {
         while (loadNextBlock()) {
-            for (; cur_pos_ < cur_block_.size(); ++cur_pos_) {
-                if (cur_block_[cur_pos_] >= target) {
-                    cur_doc_ = cur_block_[cur_pos_++];
-                    return true;
-                }
-            }
+            if (scanBlock(target)) return true;
         }
         cur_doc_ = INVALID_DOC;
         return false;
@@ -128,12 +133,7 @@ bool PostingIterator::seekToBlock(DocId target) {
     if (result.byte_offset == UINT64_MAX) {
         // target 超出 SkipList 覆盖范围，顺序加载剩余 Block
         while (loadNextBlock()) {
-            for (; cur_pos_ < cur_block_.size(); ++cur_pos_) {
-                if (cur_block_[cur_pos_] >= target) {
-                    cur_doc_ = cur_block_[cur_pos_++];
-                    return true;
-                }
-            }
+            if (scanBlock(target)) return true;
         }
         cur_doc_ = INVALID_DOC;
         return false;
@@ -141,21 +141,14 @@ bool PostingIterator::seekToBlock(DocId target) {
 
     // 目标 Block 比当前加载位置更靠前（不应发生，防御性处理）
     if (result.block_index < cur_block_idx_) {
-        // 只能在当前已加载内容内顺序查找
         while (loadNextBlock()) {
-            for (; cur_pos_ < cur_block_.size(); ++cur_pos_) {
-                if (cur_block_[cur_pos_] >= target) {
-                    cur_doc_ = cur_block_[cur_pos_++];
-                    return true;
-                }
-            }
+            if (scanBlock(target)) return true;
         }
         cur_doc_ = INVALID_DOC;
         return false;
     }
 
     // ── 向目标 Block 跳跃 ─────────────────────────────────────────────────────
-    // 计算目标 Block 之前共有多少 doc（用于重置 remaining_）
     uint32_t docs_before = 0;
     for (size_t i = 0; i < result.block_index; ++i)
         docs_before += (i < skip_list_.size()) ? skip_list_.node(i).doc_count : 128u;
@@ -168,14 +161,9 @@ bool PostingIterator::seekToBlock(DocId target) {
     file_.clear();
     file_.seekg(static_cast<std::streamoff>(meta_.posting_offset + result.byte_offset));
 
-    // 加载目标 Block 并在块内扫描
+    // 加载目标 Block 并二分查找（SkipList 精度保证 target 在本 Block 内）
     while (loadNextBlock()) {
-        for (; cur_pos_ < cur_block_.size(); ++cur_pos_) {
-            if (cur_block_[cur_pos_] >= target) {
-                cur_doc_ = cur_block_[cur_pos_++];
-                return true;
-            }
-        }
+        if (scanBlock(target)) return true;
         // target 不在本 Block（SkipList 精度内不应发生），继续下一 Block
     }
 

@@ -59,6 +59,11 @@ private:
     // 然后在块内扫描到第一个 >= target 的 doc
     bool seekToBlock(DocId target);
 
+    // 在 cur_block_[cur_pos_..] 内二分查找第一个 >= target 的 doc
+    // 找到：设置 cur_doc_ / cur_pos_，返回 true
+    // 未找到：cur_pos_ = cur_block_.size()，返回 false
+    bool scanBlock(DocId target);
+
     TermMeta           meta_;                    // 值拷贝，生命期独立于 SegmentReader
     std::ifstream      file_;                    // 独立文件句柄
 
