@@ -23,24 +23,20 @@ c.ub = meta->upper_bound * idf;   // 全局 max_tf_norm × idf
 
 ---
 
-## 前置依赖
+## 前置依赖（均已完成）
 
-**必须先完成 `lazy_posting_iterator.md`**，因为：
-
-1. `blockMaxScore()` 接口由 `PostingIterator` 提供（当前 Block 的 `SkipNode.max_score`）
-2. Block 级跳跃需要 `iter.advance(target)` 跳到 Block 边界，而非在全量 vector 上做 `lower_bound`
-
-无 lazy iterator 时可做退化版本（见"退化版本"节），但剪枝效果有限。
+1. ✅ `lazy_posting_iterator.md`：`PostingIterator` 提供 `blockMaxScore()` / `blockMaxDocId()` / `advance()`
+2. ✅ per-block max_score 写入：`calcBlockMaxTfNorms()` + `PForDelta::compress(block_ubs)` 确保每 Block 存储独立的 max_tf_norm
 
 ---
 
-## 算法变更
+## 算法变更（已实现）
 
-### 原 WAND 流程（简化）
+### 原 WAND 流程
 
 ```
 sort cursors by curDoc()
-find pivot: first cursor where Σ(c.ub) >= θ
+find pivot: first cursor where Σ(c.list_ub) >= θ
 if minDoc == pivotDoc:
     exact_score = bm25Score(pivotDoc)
     try push to heap
@@ -49,53 +45,45 @@ else:
     advance cursors before pivot to pivotDoc
 ```
 
-### BlockMaxWAND 新增一步（在精确计算前）
+### BlockMaxWAND 完整流程
 
 ```
 sort cursors by curDoc()
-find pivot: first cursor where Σ(c.block_ub) >= θ   // ← 用 block_ub，非全局 ub
+find pivot: first cursor where Σ(c.list_ub) >= θ   // pivot 判断仍用 list_ub（保证不漏召回）
 if minDoc == pivotDoc:
-    // ★ 新增：Block 级检验
-    block_ub_sum = Σ(c.blockMaxScore() * idf) for all cursors at pivotDoc's block
+    // ★ Block 级细筛
+    block_ub_sum = Σ(c.block_ub for ALL cursors)
+    // 为什么用 ALL？Σ(ALL block_ub) 是任意 doc 分数的保守上界：
+    //   curDoc==pivot 的 cursor：block_ub = 当前 Block 内最高贡献
+    //   curDoc>pivot 的 cursor：已越过 pivot，对 pivot 贡献=0 ≤ block_ub
     if block_ub_sum < θ:
-        // 整个 Block 不可能进 TopK，跳过整个 Block
-        for each cursor at pivotDoc: iter.advance(blockEnd(pivotDoc))
-        continue
-    
-    // Block 通过检验，精确计算
-    exact_score = bm25Score(pivotDoc, term_idfs)
-    try push to heap
-    advance all cursors at pivotDoc
+        // 当前所有 Block 内没有 doc 能进 TopK
+        for each cursor: iter.advance(blockMaxDocId() + 1)  // 整个 Block 跳过
+        for each cursor: refreshBlockUb()
+    else:
+        exact_score = bm25Score(pivotDoc, term_idfs)
+        try push to heap
+        for cursors at pivotDoc: iter.advance(pivotDoc + 1); refreshBlockUb()
 else:
     advance cursors before pivot to pivotDoc
-    // ★ 跨 Block advance 后，更新 cursor 的 block_ub
-    for each advanced cursor: c.block_ub = c.iter.blockMaxScore() * idf
+    for each advanced cursor: refreshBlockUb()   // 跨 Block 后刷新
 ```
 
 ---
 
-## TermCursor 结构变更
+## TermCursor 结构（已实现）
 
 ```cpp
 struct TermCursor {
     std::string      term;
-    PostingIterator  iter;      // 惰性迭代器（依赖 lazy_posting_iterator）
-    float            list_ub;   // 整条 list 的 UB = meta->upper_bound * idf（WAND 粗筛）
-    float            block_ub;  // 当前 Block 的 UB = iter.blockMaxScore() * idf（BlockMax 细筛）
+    PostingIterator  iter;
+    float            idf;
+    float            list_ub;   // 整条 list 的 max_tf_norm × IDF（静态，WAND pivot 用）
+    float            block_ub;  // 当前 Block 的 max_tf_norm × IDF（动态，BlockMax 细筛用）
 
     DocId curDoc() const { return iter.docId(); }
-
-    // advance 后调用，同步更新 block_ub
-    void refreshBlockUb(float idf) {
-        block_ub = iter.blockMaxScore() * idf;
-    }
+    void refreshBlockUb() { block_ub = iter.blockMaxScore() * idf; }
 };
-```
-
-初始化时：
-```cpp
-c.list_ub  = meta->upper_bound * idf;     // 构造时设置，不再变动
-c.block_ub = iter.blockMaxScore() * idf;  // 每次 advance 后刷新
 ```
 
 ---
@@ -103,13 +91,13 @@ c.block_ub = iter.blockMaxScore() * idf;  // 每次 advance 后刷新
 ## 两级 UB 的使用策略
 
 ```
-WAND pivot 判断使用：list_ub（整条 list，保守上界，决定是否需要精确计算）
-BlockMax 剪枝使用：block_ub（当前 Block，动态更新，决定是否跳过整个 Block）
+WAND pivot 判断：list_ub（保守，不随 Block 推进变化，保证不漏召回）
+BlockMax 细筛：  block_ub（激进，随 advance 动态刷新，跳过整个 Block）
 ```
 
-两级分工避免误剪：
-- `list_ub` 过滤：确保 WAND 不会漏掉真正的 TopK 候选
-- `block_ub` 过滤：在 WAND 认为值得看的 doc 中，进一步跳过分数不够的 Block
+正确性保证：
+- `list_ub` 是整条 list 的上界，不会随 cursor 推进减小，WAND pivot 判断永远安全
+- `Σ(ALL block_ub) < θ` → 当前所有 Block 内无 doc 能超过 θ → 整块跳过正确
 
 ---
 
@@ -144,17 +132,6 @@ writeDoc()
 ```
 
 ---
-
-## 退化版本（无 lazy iterator 时）
-
-若 lazy iterator 尚未完成，可做以下简化版本作为过渡：
-
-1. 仍全量加载 posting list 到 `vector<DocId>`
-2. 为每个 cursor 维护 `cur_block_idx_ = ptr / 128`
-3. `block_ub = skip_list.node(cur_block_idx_).max_score * idf`
-4. 在 `min_doc == pivot_doc` 时，检查 `block_ub_sum < θ` 则把 ptr 推到下一个 Block 开头
-
-退化版本不节省内存，但可以验证 Block 级剪枝的正确性，为切换到完整版本做铺垫。
 
 ---
 

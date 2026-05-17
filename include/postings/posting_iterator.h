@@ -40,6 +40,8 @@ public:
 
     DocId docId()         const { return cur_doc_; }
     float blockMaxScore() const { return block_max_score_; }
+    // 当前 Block 内最大的 doc_id（用于 BlockMaxWAND 跳过整个 Block）
+    DocId blockMaxDocId() const { return cur_block_.empty() ? INVALID_DOC : cur_block_.back(); }
     bool  isEnd()         const { return cur_doc_ == INVALID_DOC; }
 
     // 推进到下一个 doc；return false 表示耗尽

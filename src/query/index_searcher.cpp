@@ -298,11 +298,17 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
     const SegmentReader& seg,
     const NumericFilter* filter) const
 {
+    // ── TermCursor ────────────────────────────────────────────────────────────
+    // list_ub  : 整条 posting list 的上界（WAND pivot 判断，静态不变）
+    // block_ub : 当前 Block 的上界（BlockMaxWAND 细筛，每次 advance 后刷新）
     struct TermCursor {
         std::string     term;
         PostingIterator iter;
-        float           ub;
+        float           idf;
+        float           list_ub;
+        float           block_ub;
         DocId curDoc() const { return iter.docId(); }
+        void refreshBlockUb() { block_ub = iter.blockMaxScore() * idf; }
     };
 
     if (debug_) printTermDebug(seg, terms, term_idfs);
@@ -314,9 +320,11 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
         auto idf_it = term_idfs.find(t);
         float idf = (idf_it != term_idfs.end()) ? idf_it->second : 0.0f;
         TermCursor c;
-        c.term = t;
-        c.iter = seg.postingIterator(t);
-        c.ub   = meta->upper_bound * idf;  // max_tf_norm × global_idf = 真正 UB
+        c.term     = t;
+        c.idf      = idf;
+        c.list_ub  = meta->upper_bound * idf;  // 全局 max_tf_norm × IDF，静态
+        c.iter     = seg.postingIterator(t);
+        c.block_ub = c.iter.blockMaxScore() * idf;  // 第一个 Block 的 UB
         if (!c.iter.isEnd()) cursors.push_back(std::move(c));
     }
     if (cursors.empty()) return {};
@@ -336,11 +344,11 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
             cursors.pop_back();
         if (cursors.empty()) break;
 
-        // 这一步为什么要用选全局ub当pivot? pivot算法意义是什么？
+        // ── WAND pivot 选择：用 list_ub（保守上界）保证不漏召回 ──────────────
         float ub_sum = 0.0f;
         size_t pivot_idx = cursors.size();
         for (size_t i = 0; i < cursors.size(); ++i) {
-            ub_sum += cursors[i].ub;
+            ub_sum += cursors[i].list_ub;
             if (ub_sum >= theta) { pivot_idx = i; break; }
         }
         if (pivot_idx == cursors.size()) break;
@@ -351,26 +359,49 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
         DocId min_doc = cursors[0].curDoc();
 
         if (min_doc == pivot_doc) {
-            if (seg.isAlive(pivot_doc) &&
-                (!filter || passesFilter(seg, pivot_doc, *filter))) {
-                float score = seg.bm25Score(pivot_doc, terms, term_idfs);
-                if ((int)heap.size() < top_k || score > heap.top().score) {
-                    if ((int)heap.size() == top_k) heap.pop();
-                    heap.push({score, pivot_doc});
-                    if ((int)heap.size() == top_k) theta = heap.top().score;
+            // ── BlockMaxWAND：用所有 cursor 的 block_ub 之和做细筛 ────────────
+            // Σ(ALL block_ub) 是任意 doc 得分的保守上界：
+            //   · curDoc()==pivot_doc 的 cursor：block_ub 是该 Block 内的最高贡献
+            //   · curDoc() > pivot_doc 的 cursor：已越过 pivot_doc，贡献=0 ≤ block_ub
+            // 若该上界 < θ，当前所有 Block 内没有任何 doc 能进 TopK
+            float block_ub_sum = 0.0f;
+            for (const auto& c : cursors) block_ub_sum += c.block_ub;
+
+            if (block_ub_sum < theta) {
+                // Block 级跳跃：所有 cursor 跳过当前 Block
+                for (auto& c : cursors) {
+                    DocId blk_end = c.iter.blockMaxDocId();
+                    if (blk_end != INVALID_DOC)
+                        c.iter.advance(blk_end + 1);
+                    c.refreshBlockUb();
                 }
-            }
-            // branch-1：所有处于 pivot_doc 的 cursor 都推进到下一个 doc
-            for (auto& c : cursors) {
-                if (c.curDoc() == pivot_doc)
-                    c.iter.advance(pivot_doc + 1);
+            } else {
+                // Block 通过细筛，对 pivot_doc 精确打分
+                if (seg.isAlive(pivot_doc) &&
+                    (!filter || passesFilter(seg, pivot_doc, *filter))) {
+                    float score = seg.bm25Score(pivot_doc, terms, term_idfs);
+                    if ((int)heap.size() < top_k || score > heap.top().score) {
+                        if ((int)heap.size() == top_k) heap.pop();
+                        heap.push({score, pivot_doc});
+                        if ((int)heap.size() == top_k) theta = heap.top().score;
+                    }
+                }
+                // 推进处于 pivot_doc 的 cursor 到下一个 doc
+                for (auto& c : cursors) {
+                    if (c.curDoc() == pivot_doc) {
+                        c.iter.advance(pivot_doc + 1);
+                        c.refreshBlockUb();
+                    }
+                }
             }
             changed = true;
         } else {
             // branch-2：落后于 pivot_doc 的 cursor 跳跃到 pivot_doc
             for (auto& c : cursors) {
-                if (c.curDoc() < pivot_doc)
+                if (c.curDoc() < pivot_doc) {
                     c.iter.advance(pivot_doc);
+                    c.refreshBlockUb();  // 跨 Block 后刷新 block_ub
+                }
             }
             changed = true;
         }
