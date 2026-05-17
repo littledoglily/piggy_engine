@@ -10,6 +10,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "types.h"
 #include "postings/skiplist.h"
+#include "postings/posting_iterator.h"
 #include "fastfield/fast_field_reader.h"
 #include <string>
 #include <map>
@@ -71,6 +72,9 @@ public:
         const TermMeta* m = getTermMeta(term);
         return m ? readSkipList(*m) : SkipList{};
     }
+
+    // 惰性迭代器工厂（每次返回独立文件句柄，多个迭代器可同时存在）
+    PostingIterator postingIterator(const std::string& term) const;
 
     // 计算 BM25 score（单 doc，多 term）
     // term_idfs：由 IndexSearcher 基于全局统计预算的 {term -> global_idf}

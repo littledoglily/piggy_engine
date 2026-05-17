@@ -10,6 +10,7 @@
 #include "types.h"
 #include "tokenizer/analyzer.h"
 #include "segment/segment_reader.h"
+#include "postings/posting_iterator.h"
 #include <vector>
 #include <string>
 #include <unordered_map>

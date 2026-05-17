@@ -22,6 +22,7 @@ set(LIB_SOURCES
     src/postings/pfor_delta.cpp
     src/postings/skiplist.cpp
     src/postings/posting_list.cpp
+    src/postings/posting_iterator.cpp
     src/fastfield/fast_field_writer.cpp
     src/fastfield/fast_field_reader.cpp
     src/segment/segment_writer.cpp

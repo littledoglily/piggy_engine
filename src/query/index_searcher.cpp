@@ -213,35 +213,47 @@ std::vector<SearchResult> IndexSearcher::searchAND(
 
     if (debug_) printTermDebug(seg, terms, term_idfs);
 
-    std::vector<std::vector<DocId>> lists;
-    lists.reserve(terms.size());
-    for (const auto& t : terms) {
-        lists.push_back(seg.readPostingList(t));
-        if (lists.back().empty()) return {};
-    }
-
-    std::vector<size_t> order(lists.size());
+    // 按 df 升序排列，最短列表驱动 Zigzag
+    std::vector<size_t> order(terms.size());
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-        return lists[a].size() < lists[b].size();
+        auto ma = seg.getTermMeta(terms[a]);
+        auto mb = seg.getTermMeta(terms[b]);
+        return (ma ? ma->doc_freq : 0) < (mb ? mb->doc_freq : 0);
     });
 
-    std::vector<DocId> intersection;
-    const auto& driver = lists[order[0]];
+    // 创建惰性迭代器（每个独立文件句柄）
+    std::vector<PostingIterator> iters;
+    iters.reserve(terms.size());
+    for (size_t idx : order) {
+        auto it = seg.postingIterator(terms[idx]);
+        if (it.isEnd()) return {};
+        iters.push_back(std::move(it));
+    }
 
-    for (DocId candidate : driver) {
-        if (!seg.isAlive(candidate)) continue;
-        if (filter && !passesFilter(seg, candidate, *filter)) continue;
-        bool in_all = true;
-        for (size_t i = 1; i < order.size(); ++i) {
-            const auto& lst = lists[order[i]];
-            auto it = std::lower_bound(lst.begin(), lst.end(), candidate);
-            if (it == lst.end() || *it != candidate) {
-                in_all = false;
+    // Zigzag AND：driver = iters[0]（df 最小），其余追赶
+    std::vector<DocId> intersection;
+    bool done = false;
+    while (!done && !iters[0].isEnd()) {
+        DocId target = iters[0].docId();
+        bool matched = true;
+
+        for (size_t i = 1; i < iters.size(); ++i) {
+            if (!iters[i].advance(target)) { done = true; break; }
+            if (iters[i].docId() != target) {
+                // 当前 cursor 跳过了 target，driver 追赶到 cursor 位置
+                if (!iters[0].advance(iters[i].docId())) { done = true; break; }
+                matched = false;
                 break;
             }
         }
-        if (in_all) intersection.push_back(candidate);
+
+        if (!done && matched) {
+            DocId did = target;
+            if (seg.isAlive(did) && (!filter || passesFilter(seg, did, *filter)))
+                intersection.push_back(did);
+            iters[0].advance(did + 1);
+        }
     }
 
     std::vector<SearchResult> results;
@@ -287,13 +299,10 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
     const NumericFilter* filter) const
 {
     struct TermCursor {
-        std::string         term;
-        std::vector<DocId>  docs;
-        size_t              ptr;
-        float               ub;
-        DocId curDoc() const {
-            return ptr < docs.size() ? docs[ptr] : INVALID_DOC;
-        }
+        std::string     term;
+        PostingIterator iter;
+        float           ub;
+        DocId curDoc() const { return iter.docId(); }
     };
 
     if (debug_) printTermDebug(seg, terms, term_idfs);
@@ -306,10 +315,9 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
         float idf = (idf_it != term_idfs.end()) ? idf_it->second : 0.0f;
         TermCursor c;
         c.term = t;
-        c.docs = seg.readPostingList(t);
-        c.ptr  = 0;
+        c.iter = seg.postingIterator(t);
         c.ub   = meta->upper_bound * idf;  // max_tf_norm × global_idf = 真正 UB
-        if (!c.docs.empty()) cursors.push_back(std::move(c));
+        if (!c.iter.isEnd()) cursors.push_back(std::move(c));
     }
     if (cursors.empty()) return {};
 
@@ -351,20 +359,17 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
                     if ((int)heap.size() == top_k) theta = heap.top().score;
                 }
             }
+            // branch-1：所有处于 pivot_doc 的 cursor 都推进到下一个 doc
             for (auto& c : cursors) {
-                if (c.curDoc() == pivot_doc) {
-                    while (c.ptr < c.docs.size() && c.docs[c.ptr] <= pivot_doc)
-                        ++c.ptr;
-                }
+                if (c.curDoc() == pivot_doc)
+                    c.iter.advance(pivot_doc + 1);
             }
             changed = true;
         } else {
+            // branch-2：落后于 pivot_doc 的 cursor 跳跃到 pivot_doc
             for (auto& c : cursors) {
-                if (c.curDoc() < pivot_doc) {
-                    auto it = std::lower_bound(c.docs.begin() + c.ptr,
-                                               c.docs.end(), pivot_doc);
-                    c.ptr = std::distance(c.docs.begin(), it);
-                }
+                if (c.curDoc() < pivot_doc)
+                    c.iter.advance(pivot_doc);
             }
             changed = true;
         }

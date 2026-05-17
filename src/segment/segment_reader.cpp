@@ -403,4 +403,15 @@ bool SegmentReader::hasFastField() const {
     return ff_ && ff_->hasData();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// postingIterator：惰性迭代器工厂
+// 每次调用打开独立的 .doc 文件句柄，调用方可同时持有多个迭代器而不冲突
+// ─────────────────────────────────────────────────────────────────────────────
+
+PostingIterator SegmentReader::postingIterator(const std::string& term) const {
+    const TermMeta* meta = getTermMeta(term);
+    if (!meta) return PostingIterator();
+    return PostingIterator(*meta, path("doc"));
+}
+
 } // namespace ii
