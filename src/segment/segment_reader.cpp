@@ -284,6 +284,18 @@ const TermMeta* SegmentReader::getTermMeta(const std::string& term) const {
     return &it->second;
 }
 
+// docFileForTerm：per-field 模式下找到包含该 term 的字段文件句柄
+// legacy 模式或找不到时返回 doc_file_（第一个字段或 legacy .doc）
+std::ifstream& SegmentReader::docFileForTerm(const std::string& term) const {
+    for (auto& [field, dict] : field_term_dicts_) {
+        if (dict.count(term)) {
+            auto it = doc_files_.find(field);
+            if (it != doc_files_.end()) return it->second;
+        }
+    }
+    return doc_file_;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // readSkipList：从 .doc 文件读取 SkipList（懒加载）
 // ─────────────────────────────────────────────────────────────────────────────
@@ -312,39 +324,52 @@ SkipList SegmentReader::readSkipList(const TermMeta& meta) const {
 // ─────────────────────────────────────────────────────────────────────────────
 // Todo: 当前postinglist 是全加载到内存，当postinglist过大时，可能会有性能问题，可以考虑分块加载和解压
 std::vector<DocId> SegmentReader::readPostingList(const std::string& term) const {
+    // Per-field 模式：找到包含该 term 的字段，通过 postingIterator 读取
+    // （每次创建独立文件句柄，避免共享 ifstream 的 seek 状态污染）
+    if (!field_term_dicts_.empty()) {
+        for (const auto& [field, dict] : field_term_dicts_) {
+            if (dict.count(term)) {
+                PostingIterator iter = postingIterator(field, term);
+                std::vector<DocId> result;
+                const TermMeta* m = getTermMeta(field, term);
+                if (m) result.reserve(m->doc_freq);
+                while (!iter.isEnd()) {
+                    result.push_back(iter.docId());
+                    iter.next();
+                }
+                return result;
+            }
+        }
+        return {};
+    }
+
+    // Legacy 模式：直接从 doc_file_ 读取
     const TermMeta* meta = getTermMeta(term);
     if (!meta) return {};
 
     doc_file_.clear();
     doc_file_.seekg(static_cast<std::streamoff>(meta->posting_offset));
 
-    // 估计总字节数：读到文件末尾或下一个 term 的 skip_offset
-    // 简化：读 doc_freq 个 doc，按 Block 解压
     uint32_t remaining = meta->doc_freq;
     std::vector<DocId> result;
     result.reserve(remaining);
 
     while (remaining > 0) {
-        // 读一个 Block 的 Header（16 byte）
         BlockHeader hdr;
         doc_file_.read(reinterpret_cast<char*>(&hdr), sizeof(BlockHeader));
         if (!doc_file_) break;
 
-        // 计算该 Block 的剩余字节数
         size_t main_bits  = (size_t)hdr.size * hdr.b;
         size_t main_bytes = (main_bits + 7) / 8;
         size_t patch_bytes= (size_t)hdr.exc_count * sizeof(PatchEntry);
         size_t block_body = main_bytes + patch_bytes;
 
-        // 读 Block 完整数据（Header + 主数据区 + 补丁区）
         std::vector<uint8_t> block_data(sizeof(BlockHeader) + block_body);
         std::memcpy(block_data.data(), &hdr, sizeof(BlockHeader));
         doc_file_.read(reinterpret_cast<char*>(block_data.data() + sizeof(BlockHeader)),
                        block_body);
 
-        // 解压
         PForDelta::decompressBlock(block_data.data(), result);
-
         remaining -= hdr.size;
     }
     return result;
@@ -360,29 +385,39 @@ std::vector<DocId> SegmentReader::readPostingListFrom(
     const TermMeta* meta = getTermMeta(term);
     if (!meta) return {};
 
-    // 用 SkipList 定位目标 Block
-    SkipList sl = readSkipList(*meta);
-    auto found  = sl.find(target_doc_id);
+    std::ifstream& f = docFileForTerm(term);
 
+    // SkipList 也必须从同一字段文件中读取
+    f.clear();
+    f.seekg(static_cast<std::streamoff>(meta->skip_offset));
+    uint32_t l0c, l1c;
+    f.read(reinterpret_cast<char*>(&l0c), 4);
+    f.read(reinterpret_cast<char*>(&l1c), 4);
+    size_t total_sl = 8 + (l0c + l1c) * sizeof(SkipNode);
+    std::vector<uint8_t> sl_buf(total_sl);
+    f.seekg(static_cast<std::streamoff>(meta->skip_offset));
+    f.read(reinterpret_cast<char*>(sl_buf.data()), total_sl);
+    SkipList sl = SkipList::deserialize(sl_buf.data(), sl_buf.size());
+
+    auto found = sl.find(target_doc_id);
     uint64_t start_offset = (found.byte_offset == UINT64_MAX)
                              ? meta->posting_offset
                              : meta->posting_offset + found.byte_offset;
 
-    doc_file_.seekg(static_cast<std::streamoff>(start_offset));
+    f.clear();
+    f.seekg(static_cast<std::streamoff>(start_offset));
 
     uint32_t remaining = meta->doc_freq;
-    // 跳过已通过的 Block
     if (found.block_index != SIZE_MAX) {
-        for (size_t i = 0; i < found.block_index && remaining > 0; ++i) {
+        for (size_t i = 0; i < found.block_index && remaining > 0; ++i)
             remaining -= std::min(remaining, 128u);
-        }
     }
 
     std::vector<DocId> result;
     while (remaining > 0) {
         BlockHeader hdr;
-        doc_file_.read(reinterpret_cast<char*>(&hdr), sizeof(BlockHeader));
-        if (!doc_file_) break;
+        f.read(reinterpret_cast<char*>(&hdr), sizeof(BlockHeader));
+        if (!f) break;
 
         size_t main_bytes = ((size_t)hdr.size * hdr.b + 7) / 8;
         size_t patch_bytes= (size_t)hdr.exc_count * sizeof(PatchEntry);
@@ -390,8 +425,7 @@ std::vector<DocId> SegmentReader::readPostingListFrom(
 
         std::vector<uint8_t> block_data(sizeof(BlockHeader) + block_body);
         std::memcpy(block_data.data(), &hdr, sizeof(BlockHeader));
-        doc_file_.read(reinterpret_cast<char*>(block_data.data() + sizeof(BlockHeader)),
-                       block_body);
+        f.read(reinterpret_cast<char*>(block_data.data() + sizeof(BlockHeader)), block_body);
 
         std::vector<DocId> block_docs;
         PForDelta::decompressBlock(block_data.data(), block_docs);

@@ -162,6 +162,10 @@ private:
     // per-field SkipList 读取（使用 doc_files_[field]）
     SkipList readFieldSkipList(const std::string& field, const TermMeta& meta) const;
 
+    // per-field 模式下找到包含 term 的字段文件句柄（legacy 接口路由用）
+    // 若 legacy 模式或找不到，返回 doc_file_
+    std::ifstream& docFileForTerm(const std::string& term) const;
+
     // 文件路径辅助
     std::string path(const std::string& ext) const;
     // _N.tim_title, _N.doc_body …
