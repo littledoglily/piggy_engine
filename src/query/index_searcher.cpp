@@ -9,6 +9,10 @@
 #include <set>
 #include <stdexcept>
 
+// 抑制 deprecated 警告：searchAND / searchOR_WAND 在本文件内部仍被调用
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
 namespace ii {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -203,25 +207,18 @@ std::vector<SearchResult> IndexSearcher::search(
     int                top_k,
     QueryMode          mode) const
 {
-    auto fterms = parseQuery(query);
-    if (fterms.empty()) return {};
+    Occur default_occur = (mode == QueryMode::AND) ? Occur::MUST : Occur::SHOULD;
+    QueryParser parser(analyzer_, default_search_fields_);
+    auto bq = parser.parse(query, default_occur);
 
-    std::cout << "[Search] Query: [";
-    for (size_t i = 0; i < fterms.size(); ++i) {
-        if (i) std::cout << ", ";
-        if (!fterms[i].field.empty()) std::cout << fterms[i].field << ":";
-        std::cout << fterms[i].term;
-    }
-    std::cout << "] mode=" << (mode == QueryMode::AND ? "AND" : "OR") << "\n";
+    std::cout << "[Search] Query: " << bq->debugString()
+              << " mode=" << (mode == QueryMode::AND ? "AND" : "OR") << "\n";
 
-    auto term_idfs = computeFieldTermIdfs(fterms);
+    auto term_idfs = computeIdfsFromBQ(*bq);
 
     std::vector<std::vector<SearchResult>> per_seg;
-    for (const auto& seg : segments_) {
-        per_seg.push_back(mode == QueryMode::AND
-            ? searchAND(fterms, term_idfs, top_k, *seg, nullptr)
-            : searchOR_WAND(fterms, term_idfs, top_k, *seg, nullptr));
-    }
+    for (const auto& seg : segments_)
+        per_seg.push_back(searchImpl(*bq, top_k, *seg, term_idfs, nullptr));
     return mergeTopK(per_seg, top_k);
 }
 
@@ -232,25 +229,18 @@ std::vector<SearchResult> IndexSearcher::search(
     int                  top_k,
     QueryMode            mode) const
 {
-    auto fterms = parseQuery(query);
-    if (fterms.empty()) return {};
+    Occur default_occur = (mode == QueryMode::AND) ? Occur::MUST : Occur::SHOULD;
+    QueryParser parser(analyzer_, default_search_fields_);
+    auto bq = parser.parse(query, default_occur);
 
-    std::cout << "[Search+Filter] Query: [";
-    for (size_t i = 0; i < fterms.size(); ++i) {
-        if (i) std::cout << ", ";
-        if (!fterms[i].field.empty()) std::cout << fterms[i].field << ":";
-        std::cout << fterms[i].term;
-    }
-    std::cout << "] mode=" << (mode == QueryMode::AND ? "AND" : "OR") << "\n";
+    std::cout << "[Search+Filter] Query: " << bq->debugString()
+              << " mode=" << (mode == QueryMode::AND ? "AND" : "OR") << "\n";
 
-    auto term_idfs = computeFieldTermIdfs(fterms);
+    auto term_idfs = computeIdfsFromBQ(*bq);
 
     std::vector<std::vector<SearchResult>> per_seg;
-    for (const auto& seg : segments_) {
-        per_seg.push_back(mode == QueryMode::AND
-            ? searchAND(fterms, term_idfs, top_k, *seg, &filter)
-            : searchOR_WAND(fterms, term_idfs, top_k, *seg, &filter));
-    }
+    for (const auto& seg : segments_)
+        per_seg.push_back(searchImpl(*bq, top_k, *seg, term_idfs, &filter));
 
     auto results = mergeTopK(per_seg, top_k);
     if (filter.sort_by_pubtime) {
@@ -661,5 +651,96 @@ void IndexSearcher::printResults(const std::vector<SearchResult>& results) {
                results[i].title.c_str());
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// computeIdfsFromBQ：递归收集 BooleanQuery 树中的 (field,term)，计算 IDF
+//
+// 与 computeFieldTermIdfs 使用相同公式：
+//   IDF = log(1 + (N - df + 0.5) / (df + 0.5))
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::unordered_map<std::string, float> IndexSearcher::computeIdfsFromBQ(
+    const BooleanQuery& bq) const
+{
+    std::vector<std::pair<std::string,std::string>> raw;
+    bq.collectTerms(raw);
+
+    // 去重
+    std::set<std::pair<std::string,std::string>> unique(raw.begin(), raw.end());
+
+    std::unordered_map<std::string, float> result;
+    const float N = static_cast<float>(global_total_docs_);
+
+    for (const auto& [field, term] : unique) {
+        std::string key = field.empty() ? term : (field + ":" + term);
+        if (result.count(key)) continue;
+
+        uint32_t df = 0;
+        for (const auto& seg : segments_) {
+            const TermMeta* m = field.empty()
+                ? seg->getTermMeta(term)
+                : seg->getTermMeta(field, term);
+            if (m) df += m->doc_freq;
+        }
+
+        if (df == 0) { result[key] = 0.f; continue; }
+        result[key] = std::log(1.f + (N - (float)df + 0.5f) / ((float)df + 0.5f));
+    }
+
+    return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// searchImpl：在单个 Segment 上驱动 Scorer 树，返回 top_k 结果
+//
+// 根节点类型路由：
+//   WANDScorer          → collectTopK()（内部已做 top_k 截断）
+//   其他（AND/Exclusion）→ 顺序驱动，打分后排序截断
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::vector<SearchResult> IndexSearcher::searchImpl(
+    const BooleanQuery& bq,
+    int top_k,
+    const SegmentReader& seg,
+    const std::unordered_map<std::string, float>& term_idfs,
+    const NumericFilter* filter) const
+{
+    ScorerContext ctx{seg, term_idfs, global_total_docs_, filter, top_k};
+    auto root = bq.createScorer(ctx);
+    if (!root) return {};
+
+    // WANDScorer（OR TopK）：构造时已跑完 WAND，直接读缓存结果
+    if (auto* wand = dynamic_cast<WANDScorer*>(root.get())) {
+        return wand->collectTopK();
+    }
+
+    // AND / Exclusion 路径：顺序驱动
+    std::vector<SearchResult> results;
+    while (!root->isEnd()) {
+        DocId did = root->docId();
+        if (seg.isAlive(did) && (!filter || passesFilter(seg, did, *filter))) {
+            float score = root->score();
+            auto stored = seg.readStoredDoc(did);
+            SearchResult r;
+            r.doc_id        = did;
+            r.score         = score;
+            r.ext_id        = stored.ext_id;
+            r.source        = stored.source();
+            r.title         = stored.title();
+            r.stored_fields = stored.str_fields;
+            r.pubtime       = seg.ffPubtime(static_cast<uint32_t>(did) - 1);
+            r.uid           = seg.ffUid(static_cast<uint32_t>(did) - 1);
+            results.push_back(std::move(r));
+        }
+        root->next();
+    }
+
+    std::sort(results.begin(), results.end(),
+        [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+    if ((int)results.size() > top_k) results.resize(top_k);
+    return results;
+}
+
+#pragma clang diagnostic pop
 
 } // namespace ii

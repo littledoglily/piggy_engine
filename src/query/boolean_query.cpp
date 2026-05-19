@@ -19,6 +19,11 @@ std::string TermQuery::debugString() const {
     return field_.empty() ? term_ : field_ + ":" + term_;
 }
 
+void TermQuery::collectTerms(
+    std::vector<std::pair<std::string,std::string>>& out) const {
+    out.push_back({field_, term_});
+}
+
 // ── BooleanQuery ─────────────────────────────────────────────────────────────
 
 void BooleanQuery::add(std::unique_ptr<Query> q, Occur occur) {
@@ -71,6 +76,11 @@ std::unique_ptr<Scorer> BooleanQuery::createScorer(const ScorerContext& ctx) con
     }
 
     return root;
+}
+
+void BooleanQuery::collectTerms(
+    std::vector<std::pair<std::string,std::string>>& out) const {
+    for (const auto& c : clauses_) c.query->collectTerms(out);
 }
 
 std::string BooleanQuery::debugString() const {

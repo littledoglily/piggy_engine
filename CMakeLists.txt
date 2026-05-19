@@ -35,6 +35,7 @@ set(LIB_SOURCES
     src/query/wand_scorer.cpp
     src/query/exclusion_scorer.cpp
     src/query/boolean_query.cpp
+    src/query/query_parser.cpp
 )
 
 add_library(inverted_index_lib STATIC ${LIB_SOURCES})
@@ -98,6 +99,12 @@ target_link_libraries(test_exclusion_scorer inverted_index_lib)
 
 add_executable(test_query            tests/query/test_query.cpp)
 target_link_libraries(test_query     inverted_index_lib)
+
+add_executable(test_query_parser     tests/query/test_query_parser.cpp)
+target_link_libraries(test_query_parser inverted_index_lib)
+
+add_executable(test_index_searcher   tests/query/test_index_searcher.cpp)
+target_link_libraries(test_index_searcher inverted_index_lib)
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")

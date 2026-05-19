@@ -13,6 +13,9 @@
 #include "tokenizer/analyzer.h"
 #include "segment/segment_reader.h"
 #include "postings/posting_iterator.h"
+#include "query/query.h"
+#include "query/query_parser.h"
+#include "query/wand_scorer.h"
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -72,8 +75,22 @@ private:
         const std::vector<FieldTerm>& fterms
     ) const;
 
-    // ── AND 查询：Zigzag 双指针求交集 ────────────────────────────────────────
-    // 裸 term 在 AND 模式下展开到所有默认字段（每个字段都必须命中）
+    // ── Scorer 树路径（Step 8 新增）────────────────────────────────────────
+    // 从 BooleanQuery 树收集所有 (field,term) 对并计算 IDF
+    std::unordered_map<std::string, float> computeIdfsFromBQ(
+        const BooleanQuery& bq) const;
+
+    // 驱动单个 Segment 上的 Scorer 树，返回 top_k 结果
+    std::vector<SearchResult> searchImpl(
+        const BooleanQuery& bq,
+        int top_k,
+        const SegmentReader& seg,
+        const std::unordered_map<std::string, float>& term_idfs,
+        const NumericFilter* filter
+    ) const;
+
+    // ── AND 查询：Zigzag 双指针求交集（保留，已由 searchImpl 替代）─────────
+    [[deprecated("use searchImpl via BooleanQuery")]]
     std::vector<SearchResult> searchAND(
         const std::vector<FieldTerm>& fterms,
         const std::unordered_map<std::string, float>& term_idfs,
@@ -82,8 +99,8 @@ private:
         const NumericFilter* filter
     ) const;
 
-    // ── OR 查询：WAND 算法（上界剪枝，返回 TopK）────────────────────────────
-    // 裸 term 在 OR 模式下展开到所有默认字段（任意字段命中即可）
+    // ── OR 查询：WAND 算法（保留，已由 searchImpl 替代）─────────────────────
+    [[deprecated("use searchImpl via BooleanQuery")]]
     std::vector<SearchResult> searchOR_WAND(
         const std::vector<FieldTerm>& fterms,
         const std::unordered_map<std::string, float>& term_idfs,

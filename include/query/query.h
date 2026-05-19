@@ -32,6 +32,9 @@ public:
     // 可读的调试字符串
     virtual std::string debugString() const = 0;
 
+    // 递归收集树中所有叶节点的 (field, term) 对，供 IDF 预计算使用
+    virtual void collectTerms(std::vector<std::pair<std::string,std::string>>& out) const = 0;
+
     Query()                        = default;
     Query(const Query&)            = delete;
     Query& operator=(const Query&) = delete;
@@ -46,6 +49,7 @@ public:
 
     std::unique_ptr<Scorer> createScorer(const ScorerContext& ctx) const override;
     std::string debugString() const override;  // "field:term"
+    void collectTerms(std::vector<std::pair<std::string,std::string>>& out) const override;
 
 private:
     std::string field_;
@@ -76,6 +80,7 @@ public:
 
     // 示例："(+body:python body:numpy -source:spam)"
     std::string debugString() const override;
+    void collectTerms(std::vector<std::pair<std::string,std::string>>& out) const override;
 
     const std::vector<BooleanClause>& clauses() const { return clauses_; }
 
