@@ -17,6 +17,7 @@ struct ScorerContext {
     const std::unordered_map<std::string, float>& term_idfs;  // "field:term" → idf
     uint32_t                                      total_docs;  // 全局文档数（IDF 分母）
     const NumericFilter*                          filter;      // nullptr = 无过滤
+    int                                           top_k = 10;  // WANDScorer TopK，BooleanQuery 路由时使用
 };
 
 } // namespace ii
