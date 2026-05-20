@@ -10,8 +10,10 @@ namespace ii {
 
 WANDScorer::WANDScorer(std::vector<std::unique_ptr<Scorer>> children,
                        int                                  top_k,
-                       const ScorerContext&                 ctx)
-    : children_(std::move(children)), top_k_(top_k), ctx_(&ctx)
+                       const ScorerContext&                 ctx,
+                       bool                                 use_block_max)
+    : children_(std::move(children)), top_k_(top_k), ctx_(&ctx),
+      use_block_max_(use_block_max)
 {
     // 移除构造时已耗尽的子节点
     children_.erase(
@@ -136,8 +138,9 @@ void WANDScorer::runWAND() {
             float block_ub_sum = 0.f;
             for (const auto& c : children_) block_ub_sum += c->blockMaxScore();
 
-            if (block_ub_sum < theta) {
+            if (use_block_max_ && block_ub_sum < theta) {
                 skipBlock();
+                ++blocks_skipped_;
             } else {
                 // 精确打分：对 pivot_doc 求所有子节点贡献之和
                 if (ctx_->seg.isAlive(pivot_doc) && passesFilter(pivot_doc)) {

@@ -106,5 +106,11 @@ target_link_libraries(test_query_parser inverted_index_lib)
 add_executable(test_index_searcher   tests/query/test_index_searcher.cpp)
 target_link_libraries(test_index_searcher inverted_index_lib)
 
+add_executable(test_block_max_wand   tests/query/test_block_max_wand.cpp)
+target_link_libraries(test_block_max_wand inverted_index_lib)
+
+add_executable(test_scorer_tree_e2e  tests/query/test_scorer_tree_e2e.cpp)
+target_link_libraries(test_scorer_tree_e2e inverted_index_lib)
+
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")

@@ -21,11 +21,14 @@ namespace ii {
 
 class WANDScorer : public Scorer {
 public:
-    // children: 每个子节点已指向第一个候选 doc（构造时自动跳过已耗尽的子节点）
-    // top_k  : 返回得分最高的 K 篇文档；top_k <= 0 时直接返回空
+    // children     : 每个子节点已指向第一个候选 doc（构造时自动跳过已耗尽的子节点）
+    // top_k        : 返回得分最高的 K 篇文档；top_k <= 0 时直接返回空
+    // use_block_max: true（默认）启用 BlockMaxWAND 细筛；false 退化为普通 WAND
+    //                用于正确性对比测试（两者结果必须相同，前者更快）
     WANDScorer(std::vector<std::unique_ptr<Scorer>> children,
                int                                  top_k,
-               const ScorerContext&                 ctx);
+               const ScorerContext&                 ctx,
+               bool                                 use_block_max = true);
 
     // 主接口：按得分降序返回 Top-K SearchResult（含 stored 字段和 FastField）
     std::vector<SearchResult> collectTopK();
@@ -39,6 +42,9 @@ public:
     float maxScore()      const override { return max_score_; }
     // blockMaxScore / blockMaxDocId 使用基类默认（返回 maxScore / INVALID_DOC）
     bool  isEnd()         const override { return cur_idx_ >= doc_order_hits_.size(); }
+
+    // Step 9：BlockMax 跳跃统计（用于验证 BlockMaxWAND 确实在剪枝）
+    uint32_t blocksSkipped() const { return blocks_skipped_; }
 
 private:
     // ── WAND 核心 ────────────────────────────────────────────────────────────
@@ -61,7 +67,9 @@ private:
     std::vector<std::unique_ptr<Scorer>> children_;  // 算法运行期间逐步推进
     int                  top_k_;
     const ScorerContext* ctx_;
-    float                max_score_ = 0.f;  // Σ children maxScore()，构造时缓存
+    float                max_score_     = 0.f;  // Σ children maxScore()，构造时缓存
+    bool                 use_block_max_ = true;  // 是否启用 BlockMaxWAND 细筛
+    uint32_t             blocks_skipped_ = 0;    // 被 BlockMax 跳过的 Block 总数
 
     // ── 算法结果缓冲 ─────────────────────────────────────────────────────────
     struct Hit { DocId doc_id; float score; };
