@@ -1,4 +1,4 @@
-#include "tokenizer/analyzer.h"
+#include "analysis/analyzer.h"
 #include <algorithm>
 #include <cctype>
 #include <sstream>

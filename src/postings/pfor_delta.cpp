@@ -1,4 +1,4 @@
-#include "postings/pfor_delta.h"
+#include "codec/pfor_delta.h"
 #include <algorithm>
 #include <cassert>
 #include <cstring>

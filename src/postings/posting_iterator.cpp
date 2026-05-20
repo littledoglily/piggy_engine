@@ -1,5 +1,5 @@
-#include "postings/posting_iterator.h"
-#include "postings/pfor_delta.h"
+#include "store/posting_iterator.h"
+#include "codec/pfor_delta.h"
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>

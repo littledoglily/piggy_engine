@@ -1,0 +1,2 @@
+add_library(piggy_core INTERFACE)
+target_include_directories(piggy_core INTERFACE include)

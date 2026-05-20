@@ -13,7 +13,18 @@ endif()
 set(CMAKE_CXX_FLAGS_DEBUG   "-g -O0 -DDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 
+add_subdirectory(modules/core)
+add_subdirectory(modules/codec)
+add_subdirectory(modules/analysis)
+add_subdirectory(modules/field)
+add_subdirectory(modules/store)
+
 include_directories(include)
+include_directories(modules/core/include)
+include_directories(modules/codec/include)
+include_directories(modules/analysis/include)
+include_directories(modules/field/include)
+include_directories(modules/store/include)
 
 # ── library sources ──────────────────────────────────────────────
 set(LIB_SOURCES
