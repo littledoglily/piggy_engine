@@ -225,9 +225,10 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         uint32_t df, total_tf;
         uint64_t posting_offset, skip_offset, pos_offset;
         float    upper_bound;
+        uint64_t tf_data_offset = 0;
     };
 
-    const float k1 = 1.2f;
+    const float k1 = 1.2f, b = 0.75f;
     uint32_t total_term_count = 0;
 
     for (const auto& field : all_fields) {
@@ -246,6 +247,26 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
             }
         }
         if (field_terms.empty()) continue;
+
+        // 2b-pre. 计算合并后 per-doc 字段长度 和 avgdl（用于 BM25 UB 重算）
+        std::map<DocId, uint32_t> merged_doc_lens;
+        for (const auto& gd : alive_docs) {
+            SegmentReader* reader = nullptr;
+            for (auto& r : readers_)
+                if (r->segmentId() == gd.seg_id) { reader = r.get(); break; }
+            if (!reader) continue;
+            uint64_t key = ((uint64_t)gd.seg_id << 20) | gd.orig_doc_id;
+            auto it = remap.find(key);
+            if (it == remap.end()) continue;
+            uint32_t dl = reader->fieldDocLen(field, gd.orig_doc_id);
+            merged_doc_lens[it->second] = dl;
+        }
+        float merged_avgdl = 0.f;
+        if (!merged_doc_lens.empty()) {
+            uint64_t total_len = 0;
+            for (auto& [did, l] : merged_doc_lens) total_len += l;
+            merged_avgdl = (float)total_len / (float)merged_doc_lens.size();
+        }
 
         // 2b. 打开输出文件
         std::ofstream fdoc(segFieldPath(new_segment_id, field, "doc"),
@@ -280,13 +301,13 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                         merged_pos.push_back({it->second, entry.positions});
                     }
                 } else {
-                    // FreqsOnly：PostingIterator 提供 doc_ids；tf 近似为 1
+                    // FreqsOnly：PostingIterator 提供 doc_ids + tf
                     auto iter = reader->postingIterator(field, term);
                     while (!iter.isEnd()) {
                         uint64_t key = ((uint64_t)sid << 20) | iter.docId();
                         auto it = remap.find(key);
                         if (it != remap.end())
-                            merged.push_back({it->second, 1u});
+                            merged.push_back({it->second, iter.tf()});
                         iter.next();
                     }
                 }
@@ -294,20 +315,22 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
 
             if (merged.empty()) continue;
 
-            // 按新 doc_id 升序排列
             std::sort(merged.begin(), merged.end());
             if (has_positions) std::sort(merged_pos.begin(), merged_pos.end());
 
-            // 用最终 N 重算 IDF / UB
-            uint32_t df = (uint32_t)merged.size();
-            float idf   = std::log(1.0f + (float)(output_doc_count - df + 0.5f)
-                                         / (float)(df + 0.5f));
-            uint32_t max_tf = 0;
-            for (auto& [did, tf] : merged) max_tf = std::max(max_tf, tf);
-            float max_tf_f = max_tf > 0 ? (float)max_tf : 1.f;
-            float ub = (max_tf_f * (k1 + 1.f) / (max_tf_f + k1)) * idf;
+            // 重算 IDF，使用 b=0.75 完整 BM25 上界
+            uint32_t df  = (uint32_t)merged.size();
+            float idf    = std::log(1.0f + (float)(output_doc_count - df + 0.5f)
+                                          / (float)(df + 0.5f));
+            float max_tn = 0.f;
+            for (auto& [did, tf] : merged) {
+                float tf_f = (float)tf;
+                float dl   = (float)merged_doc_lens.count(did) ? (float)merged_doc_lens[did] : merged_avgdl;
+                float denom = tf_f + k1 * (1.f - b + b * (merged_avgdl > 0.f ? dl / merged_avgdl : 1.f));
+                max_tn = std::max(max_tn, tf_f * (k1 + 1.f) / denom);
+            }
+            float ub = max_tn * idf;
 
-            // 提取 doc_id 列表 + block max_tf_norm
             std::vector<DocId> new_doc_ids;
             new_doc_ids.reserve(merged.size());
             for (auto& [did, _tf] : merged) new_doc_ids.push_back(did);
@@ -320,12 +343,14 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                 float blk_max = 0.f;
                 for (size_t j = bi; j < bend; ++j) {
                     float tf_f = (float)merged[j].second;
-                    blk_max = std::max(blk_max, tf_f * (k1 + 1.f) / (tf_f + k1));
+                    float dl   = (float)merged_doc_lens.count(merged[j].first)
+                                 ? (float)merged_doc_lens[merged[j].first] : merged_avgdl;
+                    float denom = tf_f + k1 * (1.f - b + b * (merged_avgdl > 0.f ? dl / merged_avgdl : 1.f));
+                    blk_max = std::max(blk_max, tf_f * (k1 + 1.f) / denom);
                 }
                 block_ubs.push_back(blk_max);
             }
 
-            // PForDelta + SkipList
             std::vector<SkipNode> skip_nodes;
             auto compressed = PForDelta::compress(new_doc_ids, skip_nodes, block_ubs);
             SkipList sl(skip_nodes);
@@ -342,6 +367,13 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
 
             wBytes(fdoc, sl_bytes);
             wBytes(fdoc, compressed);
+
+            // tf 字节数组（按 merged 升序排列，与 doc_ids 对应）
+            ntm.tf_data_offset = (uint64_t)fdoc.tellp();
+            for (auto& [did, tf] : merged) {
+                uint8_t tb = (uint8_t)std::min(tf, 255u);
+                fdoc.write((char*)&tb, 1);
+            }
 
             if (has_positions) {
                 for (auto& [did, positions] : merged_pos) {
@@ -367,6 +399,19 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                 wU64(ftim, m.skip_offset);
                 wU64(ftim, m.pos_offset);
                 wF32(ftim, m.upper_bound);
+                wU64(ftim, m.tf_data_offset);
+            }
+        }
+
+        // 2e. 写 _N.len_<field>（per-doc 字段长度，uint16_t 数组）
+        {
+            std::ofstream flen(segFieldPath(new_segment_id, field, "len"),
+                               std::ios::binary|std::ios::trunc);
+            wU32(flen, output_doc_count);
+            for (DocId new_doc = 1; new_doc <= output_doc_count; ++new_doc) {
+                uint16_t l = merged_doc_lens.count(new_doc)
+                             ? (uint16_t)std::min(merged_doc_lens[new_doc], 65535u) : 0u;
+                flen.write((char*)&l, 2);
             }
         }
 

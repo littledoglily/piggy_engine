@@ -64,6 +64,15 @@ public:
         return it != field_avg_doc_lens_.end() ? it->second : 0.f;
     }
 
+    // per-doc 字段长度（token 数）；未记录时返回 0
+    uint32_t fieldDocLen(const std::string& field, DocId doc_id) const {
+        auto it = field_doc_lens_.find(field);
+        if (it == field_doc_lens_.end() || doc_id == 0 ||
+            doc_id > static_cast<DocId>(it->second.size()))
+            return 0;
+        return it->second[doc_id - 1];
+    }
+
     // ── 向后兼容 API（deprecated，不感知字段维度）──────────────────────────────
 
     // 查找 term 的元数据（合并跨字段，返回第一个命中字段的 meta）
@@ -182,8 +191,9 @@ private:
     std::vector<bool>               liv_bitmap_;  // .liv 全量加载
 
     // per-field 模式（Step 5+）
-    std::map<std::string, std::map<std::string, TermMeta>> field_term_dicts_;  // field → {term → TermMeta}
-    std::map<std::string, float>                           field_avg_doc_lens_;  // field → avg token count per doc
+    std::map<std::string, std::map<std::string, TermMeta>> field_term_dicts_;
+    std::map<std::string, float>                           field_avg_doc_lens_;
+    std::map<std::string, std::vector<uint16_t>>           field_doc_lens_;   // field → [uint16_t × doc_count]
     std::vector<std::string>                               indexed_field_names_;
     mutable std::map<std::string, std::ifstream>           doc_files_;           // field → .doc_<field>
     mutable std::map<std::string, std::ifstream>           per_field_pos_files_; // field → .pos_<field>

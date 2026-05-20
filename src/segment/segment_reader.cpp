@@ -42,11 +42,24 @@ SegmentReader::SegmentReader(const std::string& dir, uint32_t segment_id)
     ff_ = std::make_unique<FastFieldReader>(dir_, seg_id_, doc_count_, schema);
 
     if (!indexed_field_names_.empty()) {
-        // Per-field 模式：为每个字段打开独立的 .doc_<field> 和 .pos_<field>
+        // Per-field 模式：为每个字段打开 .doc_<field>、.pos_<field>、.len_<field>
         for (const auto& field : indexed_field_names_) {
             auto doc_p = fieldPath(field, "doc");
             if (std::filesystem::exists(doc_p))
                 doc_files_[field].open(doc_p, std::ios::binary);
+
+            // 加载 .len_<field>（per-doc 字段长度）
+            auto len_p = fieldPath(field, "len");
+            if (std::filesystem::exists(len_p)) {
+                std::ifstream fl(len_p, std::ios::binary);
+                uint32_t cnt = 0;
+                fl.read(reinterpret_cast<char*>(&cnt), 4);
+                if (cnt > 0) {
+                    field_doc_lens_[field].resize(cnt);
+                    fl.read(reinterpret_cast<char*>(field_doc_lens_[field].data()),
+                            cnt * sizeof(uint16_t));
+                }
+            }
 
             auto pos_p = fieldPath(field, "pos");
             if (std::filesystem::exists(pos_p))
@@ -158,6 +171,8 @@ void SegmentReader::loadPerFieldTims(const std::string& indexed_fields_str) {
             meta.skip_offset     = readU64(f);
             meta.pos_offset      = readU64(f);
             meta.upper_bound     = readF32(f);
+            // tf_data_offset：新格式写入，旧格式文件无此字段（读到 eof 时保持 0）
+            meta.tf_data_offset  = (f.peek() != std::char_traits<char>::eof()) ? readU64(f) : 0;
             field_term_dicts_[field][term] = meta;
             total_ttf += meta.total_term_freq;
         }
@@ -556,14 +571,16 @@ float SegmentReader::bm25Score(
     const std::vector<std::string>& query_terms,
     const std::unordered_map<std::string, float>& term_idfs) const
 {
-    const float k1 = 1.2f;
+    const float k1 = 1.2f, b = 0.75f;
+    float avgdl = fieldAvgDocLen(field);
+    float dl    = static_cast<float>(fieldDocLen(field, doc_id));
+    // avgdl=0 表示旧索引无 .len 文件，退化为 b=0
+    float len_factor = (avgdl > 0.f) ? (1.0f - b + b * dl / avgdl) : 1.0f;
+
     float score = 0.0f;
-
     for (const auto& term : query_terms) {
-        const TermMeta* meta = getTermMeta(field, term);
-        if (!meta) continue;
+        if (!getTermMeta(field, term)) continue;
 
-        // IDF 优先查 "field:term" 键，回退到裸 term
         float idf = 0.f;
         auto idf_it = term_idfs.find(field + ":" + term);
         if (idf_it != term_idfs.end()) {
@@ -577,8 +594,8 @@ float SegmentReader::bm25Score(
         auto iter = postingIterator(field, term);
         if (!iter.advance(doc_id) || iter.docId() != doc_id) continue;
 
-        // tf 简化为 1（精确 tf 需从 .pos 读取）
-        constexpr float tf_norm = 1.0f * (1.2f + 1.0f) / (1.0f + 1.2f);
+        float tf_f    = static_cast<float>(iter.tf());
+        float tf_norm = tf_f * (k1 + 1.0f) / (tf_f + k1 * len_factor);
         score += tf_norm * idf;
     }
     return score;
@@ -593,23 +610,24 @@ float SegmentReader::bm25Score(
     const std::vector<std::string>& query_terms,
     const std::unordered_map<std::string, float>& term_idfs) const
 {
-    const float k1 = 1.2f;
+    const float k1 = 1.2f;  // legacy 路径无字段信息，保持 b=0 近似
     float score = 0.0f;
 
     for (const auto& term : query_terms) {
-        const TermMeta* meta = getTermMeta(term);
-        if (!meta) continue;
+        if (!getTermMeta(term)) continue;
 
         auto idf_it = term_idfs.find(term);
         if (idf_it == term_idfs.end()) continue;
         float idf = idf_it->second;
 
-        // 用惰性迭代器跳跃到 doc_id：SkipList 定位 Block + 块内扫描，O(log df)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         auto iter = postingIterator(term);
+#pragma clang diagnostic pop
         if (!iter.advance(doc_id) || iter.docId() != doc_id) continue;
 
-        // tf 简化为 1（精确 tf 需从 .pos 读取，当前不支持）
-        constexpr float tf_norm = 1.0f * (1.2f + 1.0f) / (1.0f + 1.2f);  // k1=1.2, tf=1
+        float tf_f    = static_cast<float>(iter.tf());
+        float tf_norm = tf_f * (k1 + 1.0f) / (tf_f + k1);
         score += tf_norm * idf;
     }
     return score;

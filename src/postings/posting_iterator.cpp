@@ -16,7 +16,7 @@ PostingIterator::PostingIterator(const TermMeta& meta, const std::string& doc_pa
     file_.open(doc_path, std::ios::binary);
     if (!file_) throw std::runtime_error("PostingIterator: cannot open " + doc_path);
 
-    // ── 读取 SkipList（格式与 SegmentReader::readSkipList 完全一致）──────────
+    // ── 读取 SkipList ─────────────────────────────────────────────────────────
     file_.seekg(static_cast<std::streamoff>(meta_.skip_offset));
     uint32_t l0c = 0, l1c = 0;
     file_.read(reinterpret_cast<char*>(&l0c), 4);
@@ -27,12 +27,19 @@ PostingIterator::PostingIterator(const TermMeta& meta, const std::string& doc_pa
     file_.read(reinterpret_cast<char*>(buf.data()), skip_bytes);
     skip_list_ = SkipList::deserialize(buf.data(), buf.size());
 
-    // ── Seek 到 Posting 起点，初始化状态 ─────────────────────────────────────
+    // ── 预加载 tf 字节数组（若 .doc 文件存储了 tf）────────────────────────────
+    if (meta_.tf_data_offset > 0 && meta_.doc_freq > 0) {
+        all_tfs_.resize(meta_.doc_freq);
+        file_.seekg(static_cast<std::streamoff>(meta_.tf_data_offset));
+        file_.read(reinterpret_cast<char*>(all_tfs_.data()), meta_.doc_freq);
+    }
+
+    // ── Seek 到 Posting 起点，推进到第一个 doc ────────────────────────────────
     remaining_ = meta_.doc_freq;
     file_.clear();
     file_.seekg(static_cast<std::streamoff>(meta_.posting_offset));
 
-    next();  // 推进到第一个 doc，构造后 docId() 即可用
+    next();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,11 +51,14 @@ bool PostingIterator::scanBlock(DocId target) {
     auto begin = cur_block_.begin() + cur_pos_;
     auto it    = std::lower_bound(begin, cur_block_.end(), target);
     if (it == cur_block_.end()) {
-        cur_pos_ = cur_block_.size();  // 块内全部 < target，耗尽当前块
+        cur_pos_ = cur_block_.size();
         return false;
     }
+    size_t idx = static_cast<size_t>(it - cur_block_.begin());
     cur_doc_ = *it;
-    cur_pos_ = static_cast<size_t>(it - cur_block_.begin()) + 1;
+    cur_tf_  = (!cur_tf_block_.empty() && idx < cur_tf_block_.size())
+               ? cur_tf_block_[idx] : 1u;
+    cur_pos_ = idx + 1;
     return true;
 }
 
@@ -76,10 +86,25 @@ bool PostingIterator::loadNextBlock() {
 
     remaining_ -= std::min(remaining_, (uint32_t)hdr.size);
 
-    // max_score 来自 SkipList Level0 节点（= Block 内 max_tf_norm）
     block_max_score_ = (cur_block_idx_ < skip_list_.size())
                        ? skip_list_.node(cur_block_idx_).max_score
                        : 0.0f;
+
+    // 填充当前 Block 的 tf 切片：block i 对应 all_tfs_[i*BLOCK_SIZE .. i*BLOCK_SIZE+size)
+    if (!all_tfs_.empty()) {
+        size_t block_start = cur_block_idx_ * (size_t)PForDelta::BLOCK_SIZE;
+        size_t block_size  = cur_block_.size();
+        if (block_start < all_tfs_.size()) {
+            size_t avail = std::min(block_size, all_tfs_.size() - block_start);
+            cur_tf_block_.assign(all_tfs_.begin() + block_start,
+                                 all_tfs_.begin() + block_start + avail);
+        } else {
+            cur_tf_block_.clear();
+        }
+    } else {
+        cur_tf_block_.clear();
+    }
+
     ++cur_block_idx_;
     cur_pos_ = 0;
     return !cur_block_.empty();
@@ -91,10 +116,14 @@ bool PostingIterator::loadNextBlock() {
 
 bool PostingIterator::next() {
     if (cur_pos_ < cur_block_.size()) {
+        cur_tf_  = (!cur_tf_block_.empty() && cur_pos_ < cur_tf_block_.size())
+                   ? cur_tf_block_[cur_pos_] : 1u;
         cur_doc_ = cur_block_[cur_pos_++];
         return true;
     }
     if (!loadNextBlock()) return false;
+    cur_tf_  = (!cur_tf_block_.empty() && cur_pos_ < cur_tf_block_.size())
+               ? cur_tf_block_[cur_pos_] : 1u;
     cur_doc_ = cur_block_[cur_pos_++];
     return true;
 }

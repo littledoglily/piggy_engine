@@ -41,10 +41,15 @@ float TermScorer::blockMaxScore() const { return iter_.blockMaxScore() * idf_; }
 DocId TermScorer::blockMaxDocId() const { return iter_.blockMaxDocId(); }
 
 float TermScorer::score() {
-    if (field_.empty()) {
-        return ctx_->seg.bm25Score(iter_.docId(), {term_}, ctx_->term_idfs);
-    }
-    return ctx_->seg.bm25Score(iter_.docId(), field_, {term_}, ctx_->term_idfs);
+    if (idf_ == 0.f) return 0.f;
+
+    const float k1 = 1.2f, b = 0.75f;
+    float tf_f  = static_cast<float>(iter_.tf());
+    float avgdl = ctx_->seg.fieldAvgDocLen(field_);
+    float dl    = static_cast<float>(ctx_->seg.fieldDocLen(field_, iter_.docId()));
+    // avgdl=0 → 旧索引无 .len 文件，退化为 b=0
+    float len_factor = (avgdl > 0.f) ? (1.0f - b + b * dl / avgdl) : 1.0f;
+    return tf_f * (k1 + 1.0f) / (tf_f + k1 * len_factor) * idf_;
 }
 
 } // namespace ii

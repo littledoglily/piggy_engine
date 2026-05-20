@@ -38,11 +38,12 @@ public:
     PostingIterator(PostingIterator&&)                 = default;
     PostingIterator& operator=(PostingIterator&&)      = default;
 
-    DocId docId()         const { return cur_doc_; }
-    float blockMaxScore() const { return block_max_score_; }
-    // 当前 Block 内最大的 doc_id（用于 BlockMaxWAND 跳过整个 Block）
-    DocId blockMaxDocId() const { return cur_block_.empty() ? INVALID_DOC : cur_block_.back(); }
-    bool  isEnd()         const { return cur_doc_ == INVALID_DOC; }
+    DocId    docId()         const { return cur_doc_; }
+    float    blockMaxScore() const { return block_max_score_; }
+    DocId    blockMaxDocId() const { return cur_block_.empty() ? INVALID_DOC : cur_block_.back(); }
+    bool     isEnd()         const { return cur_doc_ == INVALID_DOC; }
+    // 当前 doc 在该字段内的 term 频次（tf）；若 .doc 文件未存储 tf 则返回 1
+    uint32_t tf()            const { return cur_tf_; }
 
     // 推进到下一个 doc；return false 表示耗尽
     bool next();
@@ -64,16 +65,21 @@ private:
     // 未找到：cur_pos_ = cur_block_.size()，返回 false
     bool scanBlock(DocId target);
 
-    TermMeta           meta_;                    // 值拷贝，生命期独立于 SegmentReader
-    std::ifstream      file_;                    // 独立文件句柄
+    TermMeta           meta_;
+    std::ifstream      file_;
 
     SkipList           skip_list_;
-    uint32_t           remaining_       = 0;     // 剩余未解压的 doc 数
-    size_t             cur_block_idx_   = 0;     // 下一个要加载的 Block 序号（0-indexed）
-    std::vector<DocId> cur_block_;               // 当前已解压 Block 的 doc_id 列表
+    uint32_t           remaining_       = 0;
+    size_t             cur_block_idx_   = 0;     // 即将加载的 Block 序号（0-indexed）
+    std::vector<DocId> cur_block_;
     size_t             cur_pos_         = 0;     // cur_block_ 中下一个待返回的下标
     DocId              cur_doc_         = INVALID_DOC;
     float              block_max_score_ = 0.0f;
+
+    // tf 支持：构造时从 tf_data_offset 预加载所有 tf 字节
+    std::vector<uint8_t> all_tfs_;               // 全量 tf（one byte per doc，按 posting 顺序）
+    std::vector<uint8_t> cur_tf_block_;          // 当前 Block 的 tf 切片
+    uint32_t             cur_tf_ = 1;            // 当前 doc 的 tf
 };
 
 } // namespace ii

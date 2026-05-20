@@ -111,10 +111,12 @@ public:
 private:
     // ── per-field 倒排写入 ───────────────────────────────────────────────────
     void writeFieldTim(const std::string& field, const InMemoryIndex& idx,
+                       const std::map<DocId, uint32_t>& doc_lens, float avgdl,
                        std::map<std::string, TermMeta>& dict_out,
                        SegmentWriteStats& stats);
 
     void writeFieldDoc(const std::string& field, const InMemoryIndex& idx,
+                       const std::map<DocId, uint32_t>& doc_lens,
                        std::map<std::string, TermMeta>& dict,
                        SegmentWriteStats& stats);
 
@@ -132,8 +134,22 @@ private:
     void writeSi(const SegmentInfo& info);
 
     // ── BM25 辅助 ────────────────────────────────────────────────────────────
-    static float calcMaxTfNorm(const PostingList& pl);
-    static std::vector<float> calcBlockMaxTfNorms(const PostingList& pl);
+    // 计算字段内每个 doc 的 token 数（doc_id → length）
+    static std::map<DocId, uint32_t> computeFieldDocLens(const InMemoryIndex& idx);
+
+    // max tf_norm（不含 IDF），b=0.75 完整 BM25；avgdl=0 退化为 b=0
+    static float calcMaxTfNorm(const PostingList& pl,
+                               const std::map<DocId, uint32_t>& doc_lens,
+                               float avgdl);
+
+    static std::vector<float> calcBlockMaxTfNorms(const PostingList& pl,
+                                                  const std::map<DocId, uint32_t>& doc_lens,
+                                                  float avgdl);
+
+    // 写 _N.len_<field>：uint16_t[total_docs]，索引 = doc_id - 1
+    void writeFieldLen(const std::string& field,
+                       const std::map<DocId, uint32_t>& doc_lens,
+                       uint32_t total_docs);
 
     // ── 路径辅助 ─────────────────────────────────────────────────────────────
     // path("fdt") → dir_/_N.fdt

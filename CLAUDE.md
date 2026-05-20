@@ -80,6 +80,18 @@ cmake --build build -j4
 
 5. **SIMD 解压**：PForDelta 当前是位循环，可替换为 AVX2/AVX512 批量解包。
 
+6. 模块重新抽象，主要是claude无法处理2W行代码中型项目,iterator, 存储， 压缩， 打分计算
+
+7. 除了现有query的补全，现在只支持boolean query, term query
+
+8. 支持多线程构建索引
+
+9. Document的schema 化，去掉硬编码
+
+10. 各种seek 调试工具
+
+11. 各种索引构建、在线search优化
+
 ## 已知设计权衡
 
 - **IDF 的 N**：flush 时用当前 Segment 文档数（近似），Merge 时用合并后总文档数重算 IDF 和 SkipNode.max_score

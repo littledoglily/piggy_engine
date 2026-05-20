@@ -59,6 +59,7 @@ struct TermMeta {
     uint64_t  skip_offset;      // .doc 文件中 SkipList 起始偏移
     uint64_t  pos_offset;       // .pos 文件中位置信息起始偏移
     float     upper_bound;      // UB：该 term 最大 BM25 贡献分（WAND 剪枝）
+    uint64_t  tf_data_offset = 0; // .doc 文件中 tf 字节数组起始偏移（0 = 未存储）
 };
 
 // ── Document：写入索引的原始文档 ─────────────────────────────────────────────
