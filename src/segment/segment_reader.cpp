@@ -1,4 +1,4 @@
-#include "segment/segment_reader.h"
+#include "index/segment_reader.h"
 #include "fastfield/fast_field_reader.h"
 #include "schema/schema.h"
 #include "postings/pfor_delta.h"

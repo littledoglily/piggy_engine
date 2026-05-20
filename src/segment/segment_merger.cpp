@@ -1,4 +1,4 @@
-#include "segment/segment_merger.h"
+#include "index/segment_merger.h"
 #include "fastfield/fast_field_writer.h"
 #include "schema/schema.h"
 #include <cmath>

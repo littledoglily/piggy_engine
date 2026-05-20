@@ -18,6 +18,7 @@ add_subdirectory(modules/codec)
 add_subdirectory(modules/analysis)
 add_subdirectory(modules/field)
 add_subdirectory(modules/store)
+add_subdirectory(modules/index)
 
 include_directories(include)
 include_directories(modules/core/include)
@@ -25,6 +26,7 @@ include_directories(modules/codec/include)
 include_directories(modules/analysis/include)
 include_directories(modules/field/include)
 include_directories(modules/store/include)
+include_directories(modules/index/include)
 
 # ── library sources ──────────────────────────────────────────────
 set(LIB_SOURCES

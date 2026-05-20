@@ -1,4 +1,4 @@
-#include "segment/segment_writer.h"
+#include "index/segment_writer.h"
 #include "postings/pfor_delta.h"
 #include "postings/skiplist.h"
 #include <fstream>

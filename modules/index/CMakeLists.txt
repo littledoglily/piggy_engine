@@ -1,0 +1,3 @@
+add_library(piggy_index INTERFACE)
+target_include_directories(piggy_index INTERFACE include)
+target_link_libraries(piggy_index INTERFACE piggy_core piggy_codec piggy_store piggy_field piggy_analysis)

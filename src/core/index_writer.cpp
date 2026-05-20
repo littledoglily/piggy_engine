@@ -1,4 +1,4 @@
-#include "core/index_writer.h"
+#include "index/index_writer.h"
 #include <iostream>
 #include <fstream>
 #include <filesystem>
