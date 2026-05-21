@@ -36,7 +36,7 @@ target_link_libraries(inverted_index_lib INTERFACE
 target_include_directories(inverted_index_lib INTERFACE include)
 
 # ── main demo ────────────────────────────────────────────────────
-add_executable(demo src/core/main.cpp)
+add_executable(demo tools/demo.cpp)
 target_link_libraries(demo inverted_index_lib)
 
 # ── unit tests ───────────────────────────────────────────────────
