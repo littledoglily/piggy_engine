@@ -1,6 +1,6 @@
 #include "index/segment_writer.h"
-#include "postings/pfor_delta.h"
-#include "postings/skiplist.h"
+#include "codec/pfor_delta.h"
+#include "codec/skiplist.h"
 #include <fstream>
 #include <filesystem>
 #include <chrono>

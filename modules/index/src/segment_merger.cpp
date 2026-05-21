@@ -1,9 +1,9 @@
 #include "index/segment_merger.h"
-#include "fastfield/fast_field_writer.h"
-#include "schema/schema.h"
+#include "field/fast_field_writer.h"
+#include "field/schema.h"
 #include <cmath>
-#include "postings/pfor_delta.h"
-#include "postings/skiplist.h"
+#include "codec/pfor_delta.h"
+#include "codec/skiplist.h"
 #include <algorithm>
 #include <cassert>
 #include <cstring>

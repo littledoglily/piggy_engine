@@ -21,41 +21,19 @@ add_subdirectory(modules/store)
 add_subdirectory(modules/index)
 add_subdirectory(modules/query)
 
-# Module headers come before include/ so "query/xxx.h" resolves to module headers
-include_directories(modules/core/include)
-include_directories(modules/codec/include)
-include_directories(modules/analysis/include)
-include_directories(modules/field/include)
-include_directories(modules/store/include)
-include_directories(modules/index/include)
-include_directories(modules/query/include)
-include_directories(include)
-
-# ── library sources ──────────────────────────────────────────────
-set(LIB_SOURCES
-    src/schema/schema.cpp
-    src/tokenizer/analyzer.cpp
-    src/postings/pfor_delta.cpp
-    src/postings/skiplist.cpp
-    src/postings/posting_list.cpp
-    src/postings/posting_iterator.cpp
-    src/fastfield/fast_field_writer.cpp
-    src/fastfield/fast_field_reader.cpp
-    src/segment/segment_writer.cpp
-    src/segment/segment_reader.cpp
-    src/segment/segment_merger.cpp
-    src/core/index_writer.cpp
-    src/query/index_searcher.cpp
-    src/query/term_scorer.cpp
-    src/query/conjunction_scorer.cpp
-    src/query/wand_scorer.cpp
-    src/query/exclusion_scorer.cpp
-    src/query/boolean_query.cpp
-    src/query/query_parser.cpp
+# Umbrella interface library: links all modules + exposes legacy include/ shims
+add_library(inverted_index_lib INTERFACE)
+target_link_libraries(inverted_index_lib INTERFACE
+    piggy_query
+    piggy_index
+    piggy_field
+    piggy_store
+    piggy_analysis
+    piggy_codec
+    piggy_core
 )
-
-add_library(inverted_index_lib STATIC ${LIB_SOURCES})
-target_include_directories(inverted_index_lib PUBLIC include)
+# Legacy include/ shims (tests/tools that still use old-path headers)
+target_include_directories(inverted_index_lib INTERFACE include)
 
 # ── main demo ────────────────────────────────────────────────────
 add_executable(demo src/core/main.cpp)

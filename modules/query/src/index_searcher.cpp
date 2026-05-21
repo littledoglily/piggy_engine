@@ -1,5 +1,5 @@
 #include "query/index_searcher.h"
-#include "postings/skiplist.h"
+#include "codec/skiplist.h"
 #include <filesystem>
 #include <iostream>
 #include <algorithm>

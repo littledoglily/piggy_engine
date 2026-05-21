@@ -1,7 +1,7 @@
 #include "index/segment_reader.h"
-#include "fastfield/fast_field_reader.h"
-#include "schema/schema.h"
-#include "postings/pfor_delta.h"
+#include "field/fast_field_reader.h"
+#include "field/schema.h"
+#include "codec/pfor_delta.h"
 #include <cstring>
 #include <cmath>
 #include <stdexcept>
