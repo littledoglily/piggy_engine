@@ -17,10 +17,10 @@
 //   字段名以 schema 定义为准；wiki 格式特殊映射：body←text，source←url
 // 输出: 构建完成后打印每个 term 的 df / ttf / UB，并对 top-N 展示 posting list 样本
 
-#include "core/index_writer.h"
-#include "segment/segment_reader.h"
-#include "schema/schema.h"
-#include "types.h"
+#include "index/index_writer.h"
+#include "index/segment_reader.h"
+#include "field/schema.h"
+#include "core/types.h"
 
 #include <algorithm>
 #include <chrono>

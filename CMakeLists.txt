@@ -19,14 +19,17 @@ add_subdirectory(modules/analysis)
 add_subdirectory(modules/field)
 add_subdirectory(modules/store)
 add_subdirectory(modules/index)
+add_subdirectory(modules/query)
 
-include_directories(include)
+# Module headers come before include/ so "query/xxx.h" resolves to module headers
 include_directories(modules/core/include)
 include_directories(modules/codec/include)
 include_directories(modules/analysis/include)
 include_directories(modules/field/include)
 include_directories(modules/store/include)
 include_directories(modules/index/include)
+include_directories(modules/query/include)
+include_directories(include)
 
 # ── library sources ──────────────────────────────────────────────
 set(LIB_SOURCES

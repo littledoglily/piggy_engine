@@ -709,9 +709,19 @@ std::vector<SearchResult> IndexSearcher::searchImpl(
     auto root = bq.createScorer(ctx);
     if (!root) return {};
 
-    // WANDScorer（OR TopK）：构造时已跑完 WAND，直接读缓存结果
+    // WANDScorer（OR TopK）：构造时已跑完 WAND，结果只含 doc_id/score，这里补充 stored 字段
     if (auto* wand = dynamic_cast<WANDScorer*>(root.get())) {
-        return wand->collectTopK();
+        auto hits = wand->collectTopK();
+        for (auto& r : hits) {
+            auto stored = seg.readStoredDoc(r.doc_id);
+            r.ext_id        = stored.ext_id;
+            r.source        = stored.source();
+            r.title         = stored.title();
+            r.stored_fields = stored.str_fields;
+            r.pubtime       = seg.ffPubtime(static_cast<uint32_t>(r.doc_id) - 1);
+            r.uid           = seg.ffUid(static_cast<uint32_t>(r.doc_id) - 1);
+        }
+        return hits;
     }
 
     // AND / Exclusion 路径：顺序驱动

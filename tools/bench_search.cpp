@@ -18,8 +18,8 @@
 //   [D] 吞吐量：QPS（循环执行所有查询，统计总量）
 
 #include "query/index_searcher.h"
-#include "segment/segment_reader.h"
-#include "types.h"
+#include "index/segment_reader.h"
+#include "core/types.h"
 
 #include <algorithm>
 #include <chrono>

@@ -1,0 +1,3 @@
+add_library(piggy_query INTERFACE)
+target_include_directories(piggy_query INTERFACE include)
+target_link_libraries(piggy_query INTERFACE piggy_core piggy_store piggy_index piggy_analysis)

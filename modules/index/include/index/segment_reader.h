@@ -101,8 +101,8 @@ public:
     // FastField 接口
     const FastFieldReader& ff() const { return *ff_; }
     bool hasFastField() const;
-    int64_t ffPubtime  (uint32_t local_doc_idx) const;
-    int64_t ffUid      (uint32_t local_doc_idx) const;
+    int64_t ffPubtime  (uint32_t local_doc_idx) const override;
+    int64_t ffUid      (uint32_t local_doc_idx) const override;
     float   ffPageRank (uint32_t local_doc_idx) const;
     std::vector<uint32_t> filterPubtime(int64_t lo, int64_t hi) const;
     std::vector<uint32_t> filterUid    (int64_t uid_val)        const;

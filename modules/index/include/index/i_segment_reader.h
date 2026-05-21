@@ -28,6 +28,10 @@ public:
     virtual const std::vector<std::string>& indexedFieldNames() const = 0;
 
     virtual bool isAlive(DocId doc_id) const = 0;
+
+    // FastField access for filter checks in WANDScorer (default: no fast field)
+    virtual int64_t ffPubtime(uint32_t doc_idx) const { return 0; }
+    virtual int64_t ffUid    (uint32_t doc_idx) const { return 0; }
 };
 
 } // namespace ii

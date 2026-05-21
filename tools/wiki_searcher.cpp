@@ -34,7 +34,7 @@
 //   :and <query>      临时以 AND 模式执行本次查询
 
 #include "query/index_searcher.h"
-#include "types.h"
+#include "core/types.h"
 
 #include <algorithm>
 #include <iomanip>

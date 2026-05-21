@@ -1,5 +1,4 @@
 #include "query/term_scorer.h"
-#include "segment/segment_reader.h"
 
 namespace ii {
 
@@ -8,28 +7,17 @@ TermScorer::TermScorer(const std::string& field,
                        const ScorerContext& ctx)
     : field_(field), term_(term), ctx_(&ctx)
 {
-    // legacy 分支使用 deprecated API，此处有意为之
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    const TermMeta* meta = field_.empty()
-        ? ctx.seg.getTermMeta(term_)
-        : ctx.seg.getTermMeta(field_, term_);
+    if (field_.empty()) return;  // legacy mode not supported via ISegmentReader
 
+    const TermMeta* meta = ctx.seg.getTermMeta(field_, term_);
     if (!meta) return;  // term 不存在，iter_ 保持默认（isEnd()==true）
 
-    // IDF key："field:term" 或裸 term（legacy）
-    const std::string idf_key = field_.empty() ? term_ : (field_ + ":" + term_);
+    const std::string idf_key = field_ + ":" + term_;
     auto it = ctx.term_idfs.find(idf_key);
     idf_ = (it != ctx.term_idfs.end()) ? it->second : 0.0f;
 
-    // 静态上界：max_tf_norm × IDF
     list_ub_ = meta->upper_bound * idf_;
-
-    // 构造后迭代器已指向第一个 doc
-    iter_ = field_.empty()
-        ? ctx.seg.postingIterator(term_)
-        : ctx.seg.postingIterator(field_, term_);
-#pragma clang diagnostic pop
+    iter_ = ctx.seg.postingIterator(field_, term_);
 }
 
 DocId TermScorer::docId()         const { return iter_.docId(); }

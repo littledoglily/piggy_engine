@@ -1,5 +1,4 @@
 #include "query/wand_scorer.h"
-#include "segment/segment_reader.h"
 #include <algorithm>
 
 namespace ii {
@@ -183,24 +182,16 @@ void WANDScorer::runWAND() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// collectTopK：读 score_order_hits_，填充 stored 字段，返回 SearchResult 列表
+// collectTopK：读 score_order_hits_，返回 {doc_id, score}（stored 字段由 IndexSearcher 填充）
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::vector<SearchResult> WANDScorer::collectTopK() {
     std::vector<SearchResult> results;
     results.reserve(score_order_hits_.size());
-
     for (const auto& h : score_order_hits_) {
-        auto stored = ctx_->seg.readStoredDoc(h.doc_id);
         SearchResult r;
-        r.doc_id        = h.doc_id;
-        r.score         = h.score;
-        r.ext_id        = stored.ext_id;
-        r.source        = stored.source();
-        r.title         = stored.title();
-        r.stored_fields = stored.str_fields;
-        r.pubtime       = ctx_->seg.ffPubtime(static_cast<uint32_t>(h.doc_id) - 1);
-        r.uid           = ctx_->seg.ffUid(static_cast<uint32_t>(h.doc_id) - 1);
+        r.doc_id = h.doc_id;
+        r.score  = h.score;
         results.push_back(std::move(r));
     }
     return results;
