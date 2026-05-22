@@ -38,14 +38,15 @@ SegmentWriter::SegmentWriter(const std::string& dir, uint32_t segment_id)
     : dir_(dir), seg_id_(segment_id)
 {}
 
+// <dir>/segment_N/<ext>
 std::string SegmentWriter::path(const std::string& ext) const {
-    return dir_ + "/_" + std::to_string(seg_id_) + "." + ext;
+    return dir_ + "/segment_" + std::to_string(seg_id_) + "/" + ext;
 }
 
-// _N.tim_title, _N.doc_body, _N.pos_content …
+// <dir>/segment_N/<ext>_<field>  (e.g. segment_0/tim_body)
 std::string SegmentWriter::fieldPath(const std::string& field,
                                       const std::string& ext) const {
-    return dir_ + "/_" + std::to_string(seg_id_) + "." + ext + "_" + field;
+    return dir_ + "/segment_" + std::to_string(seg_id_) + "/" + ext + "_" + field;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,6 +110,11 @@ SegmentWriteStats SegmentWriter::flush(
 {
     using Clock = std::chrono::steady_clock;
     namespace fs = std::filesystem;
+
+    // 创建 segment 子目录并标记为写入中
+    const std::string seg_dir = dir_ + "/segment_" + std::to_string(seg_id_);
+    fs::create_directories(seg_dir);
+    { std::ofstream ing(seg_dir + "/.ing"); }   // 创建 .ing 占位文件
 
     SegmentWriteStats stats;
     stats.segment_id = seg_id_;
@@ -216,6 +222,10 @@ SegmentWriteStats SegmentWriter::flush(
         stats.avg_pl_df               = static_cast<float>(stats.total_pl_entries) / stats.term_count;
         stats.avg_skip_nodes_per_term = static_cast<float>(stats.total_skip_nodes)  / stats.term_count;
     }
+
+    // 所有文件写完：写 .done，移除 .ing
+    { std::ofstream done(seg_dir + "/.done"); }
+    fs::remove(seg_dir + "/.ing");
 
     return stats;
 }

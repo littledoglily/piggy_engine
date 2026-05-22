@@ -87,8 +87,9 @@ void test_large_threshold_all_buffered() {
     uint32_t final_id = 0;
     for (const auto& e : fs::directory_iterator(dir)) {
         auto name = e.path().filename().string();
-        if (name.size() > 4 && name.front() == '_' && name.substr(name.size()-3) == ".si")
-            final_id = static_cast<uint32_t>(std::stoul(name.substr(1, name.size()-4)));
+        if (e.is_directory() && name.size() > 8 && name.substr(0, 8) == "segment_" &&
+            fs::exists(e.path() / ".done"))
+            final_id = static_cast<uint32_t>(std::stoul(name.substr(8)));
     }
     SegmentReader reader(dir, final_id);
     if (reader.docCount() != static_cast<uint32_t>(N))
@@ -124,8 +125,9 @@ void test_mixed_auto_and_final_flush() {
     uint32_t final_id = 0;
     for (const auto& e : fs::directory_iterator(dir)) {
         auto name = e.path().filename().string();
-        if (name.size() > 4 && name.front() == '_' && name.substr(name.size()-3) == ".si")
-            final_id = static_cast<uint32_t>(std::stoul(name.substr(1, name.size()-4)));
+        if (e.is_directory() && name.size() > 8 && name.substr(0, 8) == "segment_" &&
+            fs::exists(e.path() / ".done"))
+            final_id = static_cast<uint32_t>(std::stoul(name.substr(8)));
     }
     SegmentReader reader(dir, final_id);
     if (reader.docCount() != static_cast<uint32_t>(N))
@@ -183,8 +185,9 @@ void test_commit_idempotency() {
     uint32_t final_id = 0;
     for (const auto& e : fs::directory_iterator(dir)) {
         auto name = e.path().filename().string();
-        if (name.size() > 4 && name.front() == '_' && name.substr(name.size()-3) == ".si")
-            final_id = static_cast<uint32_t>(std::stoul(name.substr(1, name.size()-4)));
+        if (e.is_directory() && name.size() > 8 && name.substr(0, 8) == "segment_" &&
+            fs::exists(e.path() / ".done"))
+            final_id = static_cast<uint32_t>(std::stoul(name.substr(8)));
     }
     SegmentReader reader(dir, final_id);
     if (reader.docCount() != static_cast<uint32_t>(N))

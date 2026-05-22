@@ -59,15 +59,15 @@ void test_write_per_field_files() {
         writer.commit();
     }
 
-    // FreqsPositions → .tim_title, .doc_title, .pos_title 均存在
-    if (!fs::exists(dir + "/_0.tim_title")) FAIL("missing _0.tim_title");
-    if (!fs::exists(dir + "/_0.doc_title")) FAIL("missing _0.doc_title");
-    if (!fs::exists(dir + "/_0.pos_title")) FAIL("missing _0.pos_title");
+    // FreqsPositions → segment_0/tim_title, doc_title, pos_title 均存在
+    if (!fs::exists(dir + "/segment_0/tim_title")) FAIL("missing segment_0/tim_title");
+    if (!fs::exists(dir + "/segment_0/doc_title")) FAIL("missing segment_0/doc_title");
+    if (!fs::exists(dir + "/segment_0/pos_title")) FAIL("missing segment_0/pos_title");
 
-    // FreqsOnly → .tim_body, .doc_body 存在，.pos_body 不存在
-    if (!fs::exists(dir + "/_0.tim_body")) FAIL("missing _0.tim_body");
-    if (!fs::exists(dir + "/_0.doc_body")) FAIL("missing _0.doc_body");
-    if (fs::exists(dir + "/_0.pos_body"))  FAIL("unexpected _0.pos_body for FreqsOnly field");
+    // FreqsOnly → segment_0/tim_body, doc_body 存在，pos_body 不存在
+    if (!fs::exists(dir + "/segment_0/tim_body")) FAIL("missing segment_0/tim_body");
+    if (!fs::exists(dir + "/segment_0/doc_body")) FAIL("missing segment_0/doc_body");
+    if (fs::exists(dir + "/segment_0/pos_body"))  FAIL("unexpected segment_0/pos_body for FreqsOnly field");
 
     PASS();
 }
@@ -184,11 +184,11 @@ void test_merge_per_field() {
 
     if (stats.output_doc_count != 2) FAIL("merged segment should have 2 docs");
 
-    // 新 Segment 的 per-field 文件必须存在
-    if (!fs::exists(dir + "/_99.tim_title")) FAIL("missing _99.tim_title after merge");
-    if (!fs::exists(dir + "/_99.doc_title")) FAIL("missing _99.doc_title after merge");
-    if (!fs::exists(dir + "/_99.tim_body"))  FAIL("missing _99.tim_body after merge");
-    if (!fs::exists(dir + "/_99.doc_body"))  FAIL("missing _99.doc_body after merge");
+    // 新 Segment 的 per-field 文件必须存在（新路径：segment_99/）
+    if (!fs::exists(dir + "/segment_99/tim_title")) FAIL("missing segment_99/tim_title after merge");
+    if (!fs::exists(dir + "/segment_99/doc_title")) FAIL("missing segment_99/doc_title after merge");
+    if (!fs::exists(dir + "/segment_99/tim_body"))  FAIL("missing segment_99/tim_body after merge");
+    if (!fs::exists(dir + "/segment_99/doc_body"))  FAIL("missing segment_99/doc_body after merge");
 
     // df 验证
     SegmentReader seg(dir, 99);

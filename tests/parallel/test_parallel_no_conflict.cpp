@@ -293,22 +293,24 @@ void test_temp_files_cleaned() {
         final_seg_id = writer.segmentIds().front();
     }
 
-    // 目录中应只有 final_seg_id 对应的文件，不含其他 _N.si 文件
-    std::set<uint32_t> all_si_ids;
+    // 目录中应只有 final_seg_id 对应的 segment_N/ 子目录（含 .done），不含其他已完成 segment
+    std::set<uint32_t> done_seg_ids;
     for (const auto& entry : fs::directory_iterator(dir)) {
+        if (!entry.is_directory()) continue;
         const auto name = entry.path().filename().string();
-        if (name.size() > 4 && name.front() == '_' && name.substr(name.size()-3) == ".si") {
-            try {
-                uint32_t id = static_cast<uint32_t>(std::stoul(name.substr(1, name.size()-4)));
-                all_si_ids.insert(id);
-            } catch (...) {}
+        if (name.size() > 8 && name.substr(0, 8) == "segment_") {
+            if (fs::exists(entry.path() / ".done")) {
+                try {
+                    done_seg_ids.insert(std::stoul(name.substr(8)));
+                } catch (...) {}
+            }
         }
     }
 
-    if (all_si_ids.size() != 1)
-        FAIL("expected 1 .si file, found " + std::to_string(all_si_ids.size()));
-    if (*all_si_ids.begin() != final_seg_id)
-        FAIL("remaining .si is seg=" + std::to_string(*all_si_ids.begin())
+    if (done_seg_ids.size() != 1)
+        FAIL("expected 1 segment_N/.done, found " + std::to_string(done_seg_ids.size()));
+    if (*done_seg_ids.begin() != final_seg_id)
+        FAIL("remaining segment is seg=" + std::to_string(*done_seg_ids.begin())
              + " expected=" + std::to_string(final_seg_id));
     PASS();
 }

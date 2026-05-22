@@ -20,16 +20,17 @@ namespace ii {
 // ─────────────────────────────────────────────────────────────────────────────
 
 IndexSearcher::IndexSearcher(const std::string& dir) {
+    // 扫描 segment_N/ 子目录（含 .done 标记的才算完成）
     std::vector<uint32_t> seg_ids;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (!entry.is_directory()) continue;
         auto name = entry.path().filename().string();
-        if (name.size() > 4 && name[0] == '_' &&
-            name.substr(name.size() - 3) == ".si")
-        {
-            try {
-                uint32_t id = std::stoul(name.substr(1, name.size() - 4));
-                seg_ids.push_back(id);
-            } catch (...) {}
+        if (name.size() > 8 && name.substr(0, 8) == "segment_") {
+            if (std::filesystem::exists(entry.path() / ".done")) {
+                try {
+                    seg_ids.push_back(std::stoul(name.substr(8)));
+                } catch (...) {}
+            }
         }
     }
     std::sort(seg_ids.begin(), seg_ids.end());

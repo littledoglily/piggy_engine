@@ -9,7 +9,7 @@ namespace ii {
 std::string FastFieldWriter::ffPath(const std::string& dir,
                                      uint32_t seg_id,
                                      const std::string& field) const {
-    return dir + "/_" + std::to_string(seg_id) + ".ff_" + field;
+    return dir + "/segment_" + std::to_string(seg_id) + "/ff_" + field;
 }
 
 void FastFieldWriter::addInt64(const std::string& field, int64_t val) {
@@ -31,6 +31,10 @@ FFWriteStats FastFieldWriter::flush(const std::string& dir, uint32_t seg_id) con
     using Clock = std::chrono::steady_clock;
     FFWriteStats stats;
     auto t0 = Clock::now();
+
+    // 确保 segment 子目录存在（FastFieldWriter 可能在 SegmentWriter 之前被独立调用）
+    std::filesystem::create_directories(
+        dir + "/segment_" + std::to_string(seg_id));
 
     for (const auto& [field, data] : int64_fields_) {
         auto p = ffPath(dir, seg_id, field);

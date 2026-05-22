@@ -92,14 +92,16 @@ static std::map<std::string, uint32_t> getTermTtf(
     return m;
 }
 
-// 扫描目录找到最大 seg_id（commit 后只有一个）
+// 扫描目录找到含 .done 标记的最大 segment_N/ id（commit 后只有一个）
 static uint32_t findFinalSegId(const std::string& dir) {
     uint32_t id = 0;
     bool found = false;
     for (const auto& e : fs::directory_iterator(dir)) {
+        if (!e.is_directory()) continue;
         auto name = e.path().filename().string();
-        if (name.size() > 4 && name.front() == '_' && name.substr(name.size()-3) == ".si") {
-            uint32_t sid = static_cast<uint32_t>(std::stoul(name.substr(1, name.size()-4)));
+        if (name.size() > 8 && name.substr(0, 8) == "segment_" &&
+            fs::exists(e.path() / ".done")) {
+            uint32_t sid = static_cast<uint32_t>(std::stoul(name.substr(8)));
             if (!found || sid > id) { id = sid; found = true; }
         }
     }

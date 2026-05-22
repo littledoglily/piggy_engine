@@ -2,6 +2,7 @@
 #include "field/fast_field_writer.h"
 #include "field/schema.h"
 #include "common/kway_merge.h"
+#include "common/file_utils.h"
 #include <cmath>
 #include "codec/pfor_delta.h"
 #include "codec/skiplist.h"
@@ -35,22 +36,9 @@ static void wBytes(std::ofstream& f, const std::vector<uint8_t>& b) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 SegmentMerger::SegmentMerger(const std::string& dir) : dir_(dir) {
-    // 扫描 .si 文件得到所有 Segment ID
-    for (const auto& e : std::filesystem::directory_iterator(dir_)) {
-        auto name = e.path().filename().string();
-        if (name.size() > 4 && name[0] == '_' &&
-            name.substr(name.size()-3) == ".si") {
-            try {
-                uint32_t id = std::stoul(name.substr(1, name.size()-4));
-                seg_ids_.push_back(id);
-            } catch (...) {}
-        }
-    }
-    std::sort(seg_ids_.begin(), seg_ids_.end());
-
-    for (uint32_t id : seg_ids_) {
+    seg_ids_ = file_utils::listSegmentIds(dir_);
+    for (uint32_t id : seg_ids_)
         readers_.push_back(std::make_unique<SegmentReader>(dir_, id));
-    }
 }
 
 SegmentMerger::SegmentMerger(const std::string& dir,
@@ -148,6 +136,11 @@ MergeStats SegmentMerger::mergeAll(uint32_t new_segment_id) {
 MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                                    uint32_t new_segment_id)
 {
+    // 创建输出 segment 目录并标记合并进行中
+    const std::string out_seg_dir = dir_ + "/segment_" + std::to_string(new_segment_id);
+    std::filesystem::create_directories(out_seg_dir);
+    { std::ofstream ing(out_seg_dir + "/.ing"); }
+
     std::cout << "\n[Merger] ══════════════════════════════════════════\n";
     std::cout << "[Merger] Starting merge: segments [";
     for (size_t i = 0; i < src_ids.size(); ++i) {
@@ -555,23 +548,19 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         deleteSegmentFiles(sid);
     }
 
-    // 统计输出文件大小（per-field 文件 + 共享文件）
+    // 合并完成：写 .done，移除 .ing
+    { std::ofstream done(out_seg_dir + "/.done"); }
+    std::filesystem::remove(out_seg_dir + "/.ing");
+
+    // 统计输出文件大小（遍历 segment_N/ 子目录，跳过 .ing/.done 状态文件）
     size_t out_bytes = 0;
-    for (const auto& ext : {"fdt","fdx","liv","si"}) {
-        std::error_code ec;
-        auto sz = std::filesystem::file_size(segPath(new_segment_id, ext), ec);
-        if (!ec) out_bytes += sz;
-    }
-    // per-field 文件（tim_<field>, doc_<field>, pos_<field>）
     {
         std::error_code ec;
-        std::string prefix = "_" + std::to_string(new_segment_id) + ".";
-        for (const auto& entry : std::filesystem::directory_iterator(dir_, ec)) {
-            auto name = entry.path().filename().string();
-            if (name.rfind(prefix, 0) == 0) {
-                auto sz = std::filesystem::file_size(entry.path(), ec);
-                if (!ec) out_bytes += sz;
-            }
+        for (const auto& entry : std::filesystem::directory_iterator(out_seg_dir, ec)) {
+            const auto name = entry.path().filename().string();
+            if (name == ".ing" || name == ".done") continue;
+            auto sz = std::filesystem::file_size(entry.path(), ec);
+            if (!ec) out_bytes += sz;
         }
     }
 
@@ -603,28 +592,13 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
 // ─────────────────────────────────────────────────────────────────────────────
 
 void SegmentMerger::deleteSegmentFiles(uint32_t seg_id) {
-    // 删除共享文件（legacy 或 per-field 共享）
-    for (const auto& ext : {"si","tim","doc","pos","fdt","fdx","liv","pay","nvm","nvd"}) {
-        std::error_code ec;
-        auto p = segPath(seg_id, ext);
-        if (std::filesystem::exists(p, ec)) {
-            std::filesystem::remove(p, ec);
-            if (!ec) std::cout << "[Merger] Removed " << p << "\n";
-        }
-    }
-    // 删除所有 _N.<ext>_<field> 文件（tim_*, doc_*, pos_*, ff_* 等）
-    std::string seg_prefix = "_" + std::to_string(seg_id) + ".";
+    std::filesystem::path seg_dir = dir_ + "/segment_" + std::to_string(seg_id);
     std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(dir_, ec)) {
-        auto name = entry.path().filename().string();
-        if (name.rfind(seg_prefix, 0) == 0) {
-            // 只删除含下划线后缀的文件（即 per-field 格式：.tim_title, .ff_pubtime …）
-            auto rest = name.substr(seg_prefix.size());
-            if (rest.find('_') != std::string::npos) {
-                std::filesystem::remove(entry.path(), ec);
-                if (!ec) std::cout << "[Merger] Removed " << entry.path().string() << "\n";
-            }
-        }
+    // 先列出子文件打印日志，再整体删除
+    if (std::filesystem::exists(seg_dir, ec)) {
+        for (const auto& entry : std::filesystem::directory_iterator(seg_dir, ec))
+            std::cout << "[Merger] Removed " << entry.path().string() << "\n";
+        std::filesystem::remove_all(seg_dir, ec);
     }
 }
 
@@ -665,12 +639,12 @@ void SegmentMerger::printStats() const {
 }
 
 std::string SegmentMerger::segPath(uint32_t seg_id, const std::string& ext) const {
-    return dir_ + "/_" + std::to_string(seg_id) + "." + ext;
+    return dir_ + "/segment_" + std::to_string(seg_id) + "/" + ext;
 }
 
 std::string SegmentMerger::segFieldPath(uint32_t seg_id, const std::string& field,
                                          const std::string& ext) const {
-    return dir_ + "/_" + std::to_string(seg_id) + "." + ext + "_" + field;
+    return dir_ + "/segment_" + std::to_string(seg_id) + "/" + ext + "_" + field;
 }
 
 } // namespace ii

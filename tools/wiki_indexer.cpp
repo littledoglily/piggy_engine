@@ -365,9 +365,9 @@ collectSegmentStats(const std::string& dir, uint32_t seg_id)
         auto sz = fs::file_size(p, ec);
         return ec ? 0 : static_cast<uint64_t>(sz);
     };
-    auto fp = [&](const std::string& ext) {
-        return dir + "/_" + std::to_string(seg_id) + "." + ext;
-    };
+    // 新路径：<dir>/segment_N/<ext> 或 <dir>/segment_N/<ext>_<field>
+    const std::string seg_dir = dir + "/segment_" + std::to_string(seg_id);
+    auto fp = [&](const std::string& name) { return seg_dir + "/" + name; };
 
     ii::SegmentWriteStats seg;
     seg.segment_id = seg_id;
@@ -388,15 +388,13 @@ collectSegmentStats(const std::string& dir, uint32_t seg_id)
     seg.liv_bytes = fsize(fp("liv"));
     seg.si_bytes  = fsize(fp("si"));
 
-    // FastField 文件：扫描 _N.ff_* 前缀
+    // FastField 文件：在 segment_N/ 目录下扫描 ff_* 前缀文件
     ii::FFWriteStats ff;
-    const std::string ff_prefix = "_" + std::to_string(seg_id) + ".ff_";
-    for (const auto& entry : fs::directory_iterator(dir)) {
+    for (const auto& entry : fs::directory_iterator(seg_dir)) {
         const std::string name = entry.path().filename().string();
-        if (name.size() > ff_prefix.size() &&
-            name.substr(0, ff_prefix.size()) == ff_prefix) {
+        if (name.size() > 3 && name.substr(0, 3) == "ff_") {
             uint64_t sz = fsize(entry.path().string());
-            ff.file_bytes[name.substr(ff_prefix.size())] = sz;
+            ff.file_bytes[name.substr(3)] = sz;
             ff.total_bytes += sz;
         }
     }
@@ -583,14 +581,17 @@ static BuildResult buildIndex(const Args& args) {
 // 阶段二：打印 Term Posting 详情
 // ─────────────────────────────────────────────────────────────────────────────
 static void printPostings(const Args& args, bool verbose) {
+    // 使用 file_utils::listSegmentIds 扫描 segment_N/ 目录（含 .done 的才算完成）
     std::vector<uint32_t> seg_ids;
     for (const auto& entry : fs::directory_iterator(args.output_dir)) {
-        auto name = entry.path().filename().string();
-        if (name.size() > 3 && name[0] == '_' &&
-            name.substr(name.size() - 3) == ".si") {
-            try {
-                seg_ids.push_back(std::stoul(name.substr(1, name.size() - 4)));
-            } catch (...) {}
+        if (!entry.is_directory()) continue;
+        const auto name = entry.path().filename().string();
+        if (name.size() > 8 && name.substr(0, 8) == "segment_") {
+            if (fs::exists(entry.path() / ".done")) {
+                try {
+                    seg_ids.push_back(std::stoul(name.substr(8)));
+                } catch (...) {}
+            }
         }
     }
     std::sort(seg_ids.begin(), seg_ids.end());

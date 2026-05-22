@@ -86,12 +86,12 @@ SegmentReader::SegmentReader(const std::string& dir, uint32_t segment_id)
 }
 
 std::string SegmentReader::path(const std::string& ext) const {
-    return dir_ + "/_" + std::to_string(seg_id_) + "." + ext;
+    return dir_ + "/segment_" + std::to_string(seg_id_) + "/" + ext;
 }
 
 std::string SegmentReader::fieldPath(const std::string& field,
                                       const std::string& ext) const {
-    return dir_ + "/_" + std::to_string(seg_id_) + "." + ext + "_" + field;
+    return dir_ + "/segment_" + std::to_string(seg_id_) + "/" + ext + "_" + field;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

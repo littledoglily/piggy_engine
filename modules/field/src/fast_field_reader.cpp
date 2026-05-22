@@ -7,7 +7,7 @@ namespace ii {
 std::string FastFieldReader::ffPath(const std::string& dir,
                                      uint32_t seg_id,
                                      const std::string& field) const {
-    return dir + "/_" + std::to_string(seg_id) + ".ff_" + field;
+    return dir + "/segment_" + std::to_string(seg_id) + "/ff_" + field;
 }
 
 FastFieldReader::FastFieldReader(const std::string& dir, uint32_t seg_id,

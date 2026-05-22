@@ -11,11 +11,13 @@ namespace ii::file_utils {
 // 确保目录存在（递归创建）
 void ensureDir(const std::string& dir);
 
-// 扫描目录，返回所有 _N.si 文件对应的 segment id，升序
+// 返回 segment 子目录路径：<dir>/segment_<seg_id>
+std::string segmentDir(const std::string& dir, uint32_t seg_id);
+
+// 扫描目录，返回所有含 .done 标记的 segment_N/ 子目录对应的 segment id，升序
 std::vector<uint32_t> listSegmentIds(const std::string& dir);
 
-// 删除指定 segment 的全部关联文件（_N.si / .tim_* / .doc_* / .pos_*
-// / .len_* / .fdt / .fdx / .liv / .ff_*）
+// 删除指定 segment 的整个子目录（segment_N/）
 void deleteSegmentFiles(const std::string& dir, uint32_t seg_id);
 
 // 检查文件是否存在
