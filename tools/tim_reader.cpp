@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+
 #include <iostream>
 #include <string>
 #include <unordered_map>
@@ -122,16 +123,12 @@ static void printEntry(const TermEntry& e) {
     std::cout << "  term            : " << e.term            << "\n"
               << "  doc_freq        : " << e.doc_freq        << "\n"
               << "  total_term_freq : " << e.total_term_freq << "\n"
-              << "  posting_offset  : 0x" << std::hex << std::setw(12) << std::setfill('0')
-                                          << e.posting_offset  << std::dec << "\n"
-              << "  skip_offset     : 0x" << std::hex << std::setw(12) << std::setfill('0')
-                                          << e.skip_offset     << std::dec << "\n"
-              << "  pos_offset      : 0x" << std::hex << std::setw(12) << std::setfill('0')
-                                          << e.pos_offset      << std::dec << "\n"
+              << "  posting_offset  : " << e.posting_offset  << "\n"
+              << "  skip_offset     : " << e.skip_offset     << "\n"
+              << "  pos_offset      : " << e.pos_offset      << "\n"
               << "  upper_bound     : " << std::fixed << std::setprecision(6)
                                         << e.upper_bound      << "\n"
-              << "  tf_data_offset  : 0x" << std::hex << std::setw(12) << std::setfill('0')
-                                          << e.tf_data_offset  << std::dec << "\n";
+              << "  tf_data_offset  : " << e.tf_data_offset  << "\n";
 }
 
 static void printCount(const TimFile& tim) {

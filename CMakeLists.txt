@@ -80,6 +80,9 @@ target_link_libraries(bench_search inverted_index_lib)
 add_executable(tim_reader        tools/tim_reader.cpp)
 # tim_reader 纯标准库，无需 inverted_index_lib
 
+add_executable(doc_reader        tools/doc_reader.cpp)
+target_link_libraries(doc_reader inverted_index_lib)
+
 add_executable(test_term_scorer  tests/query/test_term_scorer.cpp)
 target_link_libraries(test_term_scorer inverted_index_lib)
 
