@@ -722,4 +722,15 @@ std::vector<PostingEntry> SegmentReader::readPosEntries(const std::string& field
     return result;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// posIterator（per-field）：流式读 .pos_<field>，常数内存，供 K-way merge 使用
+// ─────────────────────────────────────────────────────────────────────────────
+
+PosIterator SegmentReader::posIterator(const std::string& field,
+                                        const std::string& term) const {
+    const TermMeta* meta = getTermMeta(field, term);
+    if (!meta || meta->doc_freq == 0) return PosIterator{};
+    return PosIterator(fieldPath(field, "pos"), meta->pos_offset, meta->doc_freq);
+}
+
 } // namespace ii

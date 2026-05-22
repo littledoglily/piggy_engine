@@ -1,6 +1,7 @@
 #include "index/segment_merger.h"
 #include "field/fast_field_writer.h"
 #include "field/schema.h"
+#include "common/kway_merge.h"
 #include <cmath>
 #include "codec/pfor_delta.h"
 #include "codec/skiplist.h"
@@ -280,10 +281,18 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
 
         std::map<std::string, NewTermMeta> field_term_dict;
 
-        // 2c. 对每个 term 多路归并
+        // 2c. 对每个 term 多路归并（K-way merge，输出已有序，无需 sort）
+        //
+        // MergeDoc：KwayMerge 的元素类型，按 new_doc_id 升序排列
+        struct MergeDoc {
+            DocId            new_doc_id;
+            uint32_t         tf;
+            std::vector<Pos> positions;   // FreqsOnly 时为空
+            bool operator<(const MergeDoc& o) const { return new_doc_id < o.new_doc_id; }
+        };
+
         for (const auto& term : field_terms) {
-            std::vector<std::pair<DocId, uint32_t>>          merged;     // <new_doc_id, tf>
-            std::vector<std::pair<DocId, std::vector<Pos>>>  merged_pos; // <new_doc_id, positions>
+            KwayMerge<MergeDoc> kmerge;
 
             for (uint32_t sid : src_ids) {
                 SegmentReader* reader = nullptr;
@@ -293,31 +302,59 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                 if (!reader) continue;
 
                 if (has_positions) {
-                    // FreqsPositions：readPosEntries 提供 doc_id + tf + positions
-                    for (const auto& entry : reader->readPosEntries(field, term)) {
-                        uint64_t key = ((uint64_t)sid << 20) | entry.doc_id;
-                        auto it = remap.find(key);
-                        if (it == remap.end()) continue;  // 已删除
-                        merged.push_back({it->second, entry.tf});
-                        merged_pos.push_back({it->second, entry.positions});
-                    }
+                    // FreqsPositions：PosIterator 流式读，常数内存
+                    // 用 shared_ptr 包装 move-only 迭代器，使 lambda 满足 std::function 的可拷贝要求
+                    auto iter_ptr = std::make_shared<PosIterator>(reader->posIterator(field, term));
+                    if (iter_ptr->isEnd()) continue;
+                    kmerge.addSource(
+                        [iter_ptr, sid, &remap]() mutable
+                        -> std::optional<MergeDoc> {
+                            auto& iter = *iter_ptr;
+                            while (!iter.isEnd()) {
+                                uint64_t key = ((uint64_t)sid << 20) | iter.docId();
+                                auto it = remap.find(key);
+                                uint32_t tf  = iter.tf();
+                                auto     pos = iter.takePositions();
+                                iter.next();
+                                if (it != remap.end())
+                                    return MergeDoc{it->second, tf, std::move(pos)};
+                            }
+                            return std::nullopt;
+                        });
                 } else {
-                    // FreqsOnly：PostingIterator 提供 doc_ids + tf
-                    auto iter = reader->postingIterator(field, term);
-                    while (!iter.isEnd()) {
-                        uint64_t key = ((uint64_t)sid << 20) | iter.docId();
-                        auto it = remap.find(key);
-                        if (it != remap.end())
-                            merged.push_back({it->second, iter.tf()});
-                        iter.next();
-                    }
+                    // FreqsOnly：PostingIterator 已是惰性块读取
+                    auto iter_ptr = std::make_shared<PostingIterator>(reader->postingIterator(field, term));
+                    if (iter_ptr->isEnd()) continue;
+                    kmerge.addSource(
+                        [iter_ptr, sid, &remap]() mutable
+                        -> std::optional<MergeDoc> {
+                            auto& iter = *iter_ptr;
+                            while (!iter.isEnd()) {
+                                uint64_t key = ((uint64_t)sid << 20) | iter.docId();
+                                auto it = remap.find(key);
+                                uint32_t tf = iter.tf();
+                                iter.next();
+                                if (it != remap.end())
+                                    return MergeDoc{it->second, tf, {}};
+                            }
+                            return std::nullopt;
+                        });
                 }
             }
 
-            if (merged.empty()) continue;
+            kmerge.init();
 
-            std::sort(merged.begin(), merged.end());
-            if (has_positions) std::sort(merged_pos.begin(), merged_pos.end());
+            // 从 K-way heap 拉取，输出已按 new_doc_id 升序，无需额外 sort
+            std::vector<std::pair<DocId, uint32_t>>          merged;
+            std::vector<std::pair<DocId, std::vector<Pos>>>  merged_pos;
+            MergeDoc doc;
+            while (kmerge.next(doc)) {
+                merged.push_back({doc.new_doc_id, doc.tf});
+                if (has_positions)
+                    merged_pos.push_back({doc.new_doc_id, std::move(doc.positions)});
+            }
+
+            if (merged.empty()) continue;
 
             // 重算 IDF，使用 b=0.75 完整 BM25 上界
             uint32_t df  = (uint32_t)merged.size();

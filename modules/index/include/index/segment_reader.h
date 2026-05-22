@@ -6,6 +6,7 @@
 #include "index/i_segment_reader.h"
 #include "codec/skiplist.h"
 #include "store/posting_iterator.h"
+#include "store/pos_iterator.h"
 #include "field/fast_field_reader.h"
 #include <string>
 #include <map>
@@ -58,9 +59,13 @@ public:
 
     void softDelete(DocId doc_id);
 
-    // per-field .pos 读取
+    // per-field .pos 读取（一次性加载全部，简单场景用）
     std::vector<PostingEntry> readPosEntries(const std::string& field,
                                              const std::string& term) const;
+
+    // per-field .pos 流式迭代器（K-way merge / 大 df 词用，常数内存）
+    PosIterator posIterator(const std::string& field,
+                            const std::string& term) const;
 
     // per-field BM25（query 层用 TermScorer 计算，此处供调试）
     float bm25Score(DocId doc_id,
