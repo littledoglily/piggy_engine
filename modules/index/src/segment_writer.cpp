@@ -133,34 +133,35 @@ SegmentWriteStats SegmentWriter::flush(
         // per-doc 字段长度（doc_id → token 数），用于 b=0.75 BM25
         auto doc_lens = computeFieldDocLens(idx);
 
-        std::map<std::string, TermMeta> term_dict;
+        std::map<std::string, TermMeta>            term_dict;
+        std::unordered_map<std::string, uint64_t>  tim_patch;
 
         // 1. 写 .tim_<field>
         {
             auto t = Clock::now();
-            writeFieldTim(field, idx, doc_lens, avgdl, term_dict, stats);
+            writeFieldTim(field, idx, doc_lens, avgdl, term_dict, stats, tim_patch);
             stats.tim_us    += std::chrono::duration_cast<
                                    std::chrono::microseconds>(Clock::now() - t).count();
             fstats.tim_bytes = fs::file_size(fieldPath(field, "tim"));
             stats.tim_bytes += fstats.tim_bytes;
         }
 
-        // 2. 写 .doc_<field>（含 tf 字节，并回写 tf_data_offset）
+        // 2. 写 .doc_<field>（含 tf 字节，seekp 回填 posting/skip/tf_data offset）
         {
             auto t = Clock::now();
-            writeFieldDoc(field, idx, doc_lens, term_dict, stats);
+            writeFieldDoc(field, idx, doc_lens, term_dict, stats, tim_patch);
             stats.doc_us    += std::chrono::duration_cast<
                                    std::chrono::microseconds>(Clock::now() - t).count();
             fstats.doc_bytes = fs::file_size(fieldPath(field, "doc"));
             stats.doc_bytes += fstats.doc_bytes;
         }
 
-        // 3. 写 .pos_<field>（仅 FreqsPositions）
+        // 3. 写 .pos_<field>（仅 FreqsPositions），seekp 回填 pos_offset
         const FieldSchema* fschema = schema.find(field);
         bool write_pos = fschema && (fschema->index == IndexOption::FreqsPositions);
         if (write_pos) {
             auto t = Clock::now();
-            writeFieldPos(field, idx, term_dict);
+            writeFieldPos(field, idx, term_dict, tim_patch);
             stats.pos_us    += std::chrono::duration_cast<
                                    std::chrono::microseconds>(Clock::now() - t).count();
             fstats.pos_bytes = fs::file_size(fieldPath(field, "pos"));
@@ -240,7 +241,8 @@ void SegmentWriter::writeFieldTim(
     const std::unordered_map<DocId, uint32_t>& doc_lens,
     float                            avgdl,
     std::map<std::string, TermMeta>& term_dict_out,
-    SegmentWriteStats&               stats)
+    SegmentWriteStats&               stats,
+    std::unordered_map<std::string, uint64_t>& tim_patch_out)
 {
     const auto& pls = idx.postingLists();
     std::ofstream f(fieldPath(field, "tim"), std::ios::binary | std::ios::trunc);
@@ -265,18 +267,21 @@ void SegmentWriter::writeFieldTim(
         meta.skip_offset     = 0;
         meta.pos_offset      = 0;
         meta.upper_bound     = max_tf_norm;
-        meta.tf_data_offset  = 0;  // 占位，由 writeFieldDoc 回填
+        meta.tf_data_offset  = 0;
 
         term_dict_out[term] = meta;
 
         writeStr(f, term);
         writeU32(f, meta.doc_freq);
         writeU32(f, meta.total_term_freq);
-        writeU64(f, 0);   // posting_offset
-        writeU64(f, 0);   // skip_offset
-        writeU64(f, 0);   // pos_offset
+        // 记录此处为 offsets 块起始：seekp 回填时的基址
+        // layout: posting_offset(8) skip_offset(8) pos_offset(8) upper_bound(4) tf_data_offset(8)
+        tim_patch_out[term] = static_cast<uint64_t>(f.tellp());
+        writeU64(f, 0);   // posting_offset  (+0)
+        writeU64(f, 0);   // skip_offset     (+8)
+        writeU64(f, 0);   // pos_offset      (+16)
         writeF32(f, max_tf_norm);
-        writeU64(f, 0);   // tf_data_offset
+        writeU64(f, 0);   // tf_data_offset  (+28)
     }
 }
 
@@ -289,7 +294,8 @@ void SegmentWriter::writeFieldDoc(
     const InMemoryIndex&             idx,
     const std::unordered_map<DocId, uint32_t>& doc_lens,
     std::map<std::string, TermMeta>& term_dict,
-    SegmentWriteStats&               stats)
+    SegmentWriteStats&               stats,
+    const std::unordered_map<std::string, uint64_t>& tim_patch)
 {
     // avgdl 从 doc_lens 重算（与 writeFieldTim 保持一致）
     float avgdl = 0.f;
@@ -334,25 +340,26 @@ void SegmentWriter::writeFieldDoc(
         // tf 字节数组：每个 doc 一个 uint8_t（saturate at 255），按 posting 顺序
         meta.tf_data_offset = static_cast<uint64_t>(f.tellp());
         for (const auto& e : pl.entries()) {
+            // 这个地方是对工程存储和效果的取舍，取舍逻辑是k=1.2时，tf=255时的BM25贡献分已经非常接近于 tf=inf 的情况了（约为99.6%），因此认为超过255的tf对排名贡献差别不大，直接饱和处理可以节省存储空间
             uint8_t tf_byte = static_cast<uint8_t>(std::min((uint32_t)e.tf, 255u));
             f.write(reinterpret_cast<const char*>(&tf_byte), 1);
         }
     }
 
-    // 回写所有 offset（含 tf_data_offset）到 _N.tim_<field>
+    // seekp 回填 posting_offset / skip_offset / tf_data_offset 到 _N.tim_<field>
+    // layout: posting_offset(+0,8B) skip_offset(+8,8B) pos_offset(+16,8B) upper_bound(+24,4B) tf_data_offset(+28,8B)
     {
-        std::ofstream ftim(fieldPath(field, "tim"), std::ios::binary | std::ios::trunc);
-        writeU32(ftim, term_count);
+        std::fstream ftim(fieldPath(field, "tim"),
+                          std::ios::binary | std::ios::in | std::ios::out);
         for (const auto& [term, pl] : pls) {
-            const auto& m = term_dict[term];
-            writeStr(ftim, term);
-            writeU32(ftim, m.doc_freq);
-            writeU32(ftim, m.total_term_freq);
-            writeU64(ftim, m.posting_offset);
-            writeU64(ftim, m.skip_offset);
-            writeU64(ftim, m.pos_offset);
-            writeF32(ftim, m.upper_bound);
-            writeU64(ftim, m.tf_data_offset);
+            const auto& m    = term_dict[term];
+            uint64_t    base = tim_patch.at(term);
+            ftim.seekp(static_cast<std::streamoff>(base));
+            ftim.write(reinterpret_cast<const char*>(&m.posting_offset), 8);
+            ftim.write(reinterpret_cast<const char*>(&m.skip_offset),    8);
+            // pos_offset(+16) 留给 writeFieldPos 回填，跳过
+            ftim.seekp(static_cast<std::streamoff>(base + 28));
+            ftim.write(reinterpret_cast<const char*>(&m.tf_data_offset), 8);
         }
     }
 }
@@ -370,7 +377,8 @@ void SegmentWriter::writeFieldDoc(
 void SegmentWriter::writeFieldPos(
     const std::string&               field,
     const InMemoryIndex&             idx,
-    std::map<std::string, TermMeta>& term_dict)
+    std::map<std::string, TermMeta>& term_dict,
+    const std::unordered_map<std::string, uint64_t>& tim_patch)
 {
     std::ofstream f(fieldPath(field, "pos"), std::ios::binary | std::ios::trunc);
     if (!f) throw std::runtime_error("Cannot open .pos_" + field + ": " + fieldPath(field, "pos"));
@@ -387,21 +395,14 @@ void SegmentWriter::writeFieldPos(
         }
     }
 
-    // 回写 pos_offset（+ 保持其他 offset）到 _N.tim_<field>
+    // seekp 回填 pos_offset 到 _N.tim_<field>（+16 处）
     {
-        uint32_t term_count = static_cast<uint32_t>(term_dict.size());
-        std::ofstream ftim(fieldPath(field, "tim"), std::ios::binary | std::ios::trunc);
-        writeU32(ftim, term_count);
+        std::fstream ftim(fieldPath(field, "tim"),
+                          std::ios::binary | std::ios::in | std::ios::out);
         for (const auto& [term, pl] : pls) {
-            const auto& m = term_dict[term];
-            writeStr(ftim, term);
-            writeU32(ftim, m.doc_freq);
-            writeU32(ftim, m.total_term_freq);
-            writeU64(ftim, m.posting_offset);
-            writeU64(ftim, m.skip_offset);
-            writeU64(ftim, m.pos_offset);
-            writeF32(ftim, m.upper_bound);
-            writeU64(ftim, m.tf_data_offset);
+            uint64_t pos_off = term_dict[term].pos_offset;
+            ftim.seekp(static_cast<std::streamoff>(tim_patch.at(term) + 16));
+            ftim.write(reinterpret_cast<const char*>(&pos_off), 8);
         }
     }
 }

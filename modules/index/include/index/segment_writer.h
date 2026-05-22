@@ -89,14 +89,17 @@ public:
 private:
     void writeFieldTim(const std::string& field, const InMemoryIndex& idx,
                        const std::unordered_map<DocId, uint32_t>& doc_lens, float avgdl,
-                       std::map<std::string, TermMeta>& dict_out, SegmentWriteStats& stats);
+                       std::map<std::string, TermMeta>& dict_out, SegmentWriteStats& stats,
+                       std::unordered_map<std::string, uint64_t>& tim_patch_out);
 
     void writeFieldDoc(const std::string& field, const InMemoryIndex& idx,
                        const std::unordered_map<DocId, uint32_t>& doc_lens,
-                       std::map<std::string, TermMeta>& dict, SegmentWriteStats& stats);
+                       std::map<std::string, TermMeta>& dict, SegmentWriteStats& stats,
+                       const std::unordered_map<std::string, uint64_t>& tim_patch);
 
     void writeFieldPos(const std::string& field, const InMemoryIndex& idx,
-                       std::map<std::string, TermMeta>& dict);
+                       std::map<std::string, TermMeta>& dict,
+                       const std::unordered_map<std::string, uint64_t>& tim_patch);
 
     void writeFdt(const std::vector<StoredDoc>& docs, std::vector<uint64_t>& offsets_out);
     void writeFdx(const std::vector<uint64_t>& offsets);
