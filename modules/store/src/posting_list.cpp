@@ -8,7 +8,8 @@ namespace ii {
 // PostingList
 // ─────────────────────────────────────────────────────────────────────────────
 
-void PostingList::append(DocId doc_id, Pos position) {
+size_t PostingList::append(DocId doc_id, Pos position) {
+    size_t mem_use = 0;
     auto it = doc_index_.find(doc_id);
     if (it == doc_index_.end()) {
         // 新文档：追加一个 PostingEntry
@@ -18,12 +19,16 @@ void PostingList::append(DocId doc_id, Pos position) {
         e.positions.push_back(position);
         doc_index_[doc_id] = entries_.size();
         entries_.push_back(std::move(e));
+        // 内存使用新增：PostingEntry 结构体 + doc_id 索引（不考虑 positions 向量的动态分配开销，通常较小且不频繁）
+        mem_use += sizeof(PostingEntry) + sizeof(doc_id);
     } else {
         // 同一文档再次出现该 term：累加 tf，追加 position
         PostingEntry& e = entries_[it->second];
         e.tf++;
         e.positions.push_back(position);
+        mem_use += sizeof(Pos);  // 仅考虑 positions 向量新增的 position 大小
     }
+    return mem_use;
 }
 
 std::vector<DocId> PostingList::docIds() const {
@@ -48,7 +53,13 @@ uint32_t PostingList::totalTermFreq() const {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void InMemoryIndex::addToken(const Token& tok) {
-    index_[tok.term].append(tok.doc_id, tok.position);
+    auto it = index_.find(tok.term);
+    if (it == index_.end()) {
+        ram_bytes_ += tok.term.size();  // string key in index_
+        ram_bytes_ += index_[tok.term].append(tok.doc_id, tok.position);
+    } else {
+        ram_bytes_ += it->second.append(tok.doc_id, tok.position);
+    }
 }
 
 std::vector<std::string> InMemoryIndex::sortedTerms() const {

@@ -65,6 +65,13 @@ struct StoredDoc {
     DocId       doc_id  = 0;
     uint64_t    ext_id  = 0;
     std::unordered_map<std::string, std::string> str_fields;
+    size_t     ramUsage() const {
+        size_t use = sizeof(doc_id) + sizeof(ext_id);
+        for (const auto& [name, val] : str_fields) {
+            use += name.size() + val.size();
+        }
+        return use;
+    }
 };
 
 class SegmentWriter {

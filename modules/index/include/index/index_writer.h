@@ -51,8 +51,9 @@ private:
     std::vector<StoredDoc> stored_docs_buf_;
     FastFieldWriter        ff_writer_;
 
-    uint32_t total_docs_  = 0;
-    uint32_t next_seg_id_ = 0;
+    uint32_t total_docs_      = 0;
+    uint32_t next_seg_id_     = 0;
+    size_t   stored_ram_bytes_ = 0;
 
     std::vector<SegmentWriteStats> seg_stats_history_;
     std::vector<FFWriteStats>      ff_stats_history_;

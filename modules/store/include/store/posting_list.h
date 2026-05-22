@@ -9,7 +9,7 @@ namespace ii {
 
 class PostingList {
 public:
-    void append(DocId doc_id, Pos position);
+    size_t append(DocId doc_id, Pos position);
 
     std::vector<DocId> docIds() const;
     const std::vector<PostingEntry>& entries() const { return entries_; }
@@ -33,10 +33,12 @@ public:
     size_t termCount() const { return index_.size(); }
     size_t docCount()  const { return doc_count_; }
     void   setDocCount(size_t n) { doc_count_ = n; }
+    size_t ramUsage()  const { return ram_bytes_; }
 
 private:
     std::unordered_map<std::string, PostingList> index_;
     size_t doc_count_ = 0;
+    size_t ram_bytes_ = 0;
 };
 
 } // namespace ii

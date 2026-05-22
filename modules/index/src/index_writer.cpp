@@ -60,6 +60,7 @@ void IndexWriter::addDocument(const Document& doc) {
         std::string s = desc->storeStr(val);
         if (!s.empty()) sd.str_fields[desc->name()] = std::move(s);
     }
+    stored_ram_bytes_ += sd.ramUsage();
     stored_docs_buf_.push_back(std::move(sd));
 
     for (auto& [_, idx] : field_indexes_) idx.setDocCount(total_docs_);
@@ -103,6 +104,7 @@ void IndexWriter::flush() {
     field_indexes_.clear();
     field_token_counts_.clear();
     stored_docs_buf_.clear();
+    stored_ram_bytes_ = 0;
     ff_writer_.clear();
 }
 
@@ -190,19 +192,10 @@ void IndexWriter::commit() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 size_t IndexWriter::estimateRamUsage() const {
-    size_t estimate = 0;
-    for (const auto& [_, idx] : field_indexes_) {
-        for (const auto& t : idx.sortedTerms()) {
-            const PostingList* pl = idx.getPostingList(t);
-            if (pl) estimate += t.size() + pl->size() * 32;
-        }
-    }
-    for (const auto& sd : stored_docs_buf_) {
-        for (const auto& [k, v] : sd.str_fields)
-            estimate += k.size() + v.size();
-        estimate += 16;
-    }
-    return estimate;
+    size_t total = stored_ram_bytes_;
+    for (const auto& [_, idx] : field_indexes_)
+        total += idx.ramUsage();
+    return total;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
