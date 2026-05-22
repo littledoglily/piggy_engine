@@ -4,14 +4,42 @@ Lucene 风格的 C++ 全文搜索引擎，支持 per-field 倒排索引、BM25�
 
 ## Build & Run
 
-\```bash
+```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j4
-\```
+```
+
+## 目录结构
+
+```
+modules/
+  core/       基础类型（DocId/TermMeta/IndexOption），无依赖
+  codec/      PForDelta 压缩、SkipList 序列化，纯算法无 IO
+  analysis/   文本分析管道（分词 → 小写化）
+  field/      Schema 定义加载、FastField 数值列存读写
+  store/      PostingIterator，封装 .doc_<field> 块级惰性访问
+  index/      Segment 写入/读取/合并，唯一直接操作磁盘倒排文件的层
+  query/      QueryParser、Scorer 树、IndexSearcher，只依赖 ISegmentReader 接口
+tests/        单元测试（自研宏框架，无第三方依赖）
+tools/        wiki_indexer / wiki_searcher / bench_search / demo
+include/      旧路径兼容 shim（tests/tools 中的 old-style include 仍可用）
+```
+
+每个模块独立编译（STATIC 库），各自的 `CLAUDE.md` 含该模块的详细职责和 API。
+
+## 模块依赖
+
+```
+core ◄── codec ◄── store ◄──┐
+core ◄── analysis             ├── index ◄── query
+core ◄── field  ◄─────────────┘
+```
+
+顶层 `inverted_index_lib`（INTERFACE）聚合所有模块，供 tests/tools 链接。
 
 ## 测试
 
-\```bash
+```bash
 # 基础模块
 ./build/test_all
 ./build/test_analyzer
@@ -24,7 +52,7 @@ cmake --build build -j4
 ./build/test_schema
 ./build/test_per_field_index
 
-# Query 层（Step 7–9）
+# Query 层
 ./build/test_term_scorer
 ./build/test_conjunction_scorer
 ./build/test_wand_scorer
@@ -36,17 +64,17 @@ cmake --build build -j4
 ./build/test_scorer_tree_e2e
 
 ./build/demo
-\```
+```
 
 测试框架：自研宏（`tests/test_utils.h`），TEST/PASS/FAIL，无第三方依赖。
 
 ## 工具
 
-\```bash
+```bash
 ./build/wiki_indexer --input <dir> --output ./wiki_index --schema my_schema.json --ram 256
 ./build/wiki_searcher --index ./wiki_index --query "body:python language" --mode AND --top 5
 ./build/bench_search  --index ./wiki_index --query "python" --top 10
-\```
+```
 
 查询语法：`+term`（MUST）、`-term`（MUST_NOT）、裸词（SHOULD），`field:term` 限定字段，可混用。
 
@@ -59,12 +87,13 @@ cmake --build build -j4
 | 基础索引 | PForDelta、SkipList、PostingList、PostingIterator | ✅ |
 | Segment | Writer/Reader/Merger，含软删除与 IDF/UB Merge 时重算 | ✅ |
 | 存储层 | StoredDoc（fdt/fdx）、FastField 列存、Schema/FieldDescriptor | ✅ |
-| Per-field 倒排 | Step 1–8，含 wiki_searcher `field:term` 语法 | ✅ |
+| Per-field 倒排 | 含 wiki_searcher `field:term` 语法 | ✅ |
 | Query 层 | TermQuery/BooleanQuery(MUST/SHOULD/MUST_NOT) → Scorer 树 | ✅ |
 | Scorer 树 | TermScorer、ConjunctionScorer、WANDScorer、ExclusionScorer | ✅ |
 | BlockMaxWAND | `skipBlock()` + `use_block_max` + `blocks_skipped` 统计 | ✅ |
 | QueryParser | `+field:term -term bare_term` → BooleanQuery 树 | ✅ |
 | IndexSearcher | BooleanQuery 驱动，跨 Segment 归并 | ✅ |
+| 模块化重构 | 7 个独立 STATIC 模块，src/ 目录已删除 | ✅ |
 
 ## TODO
 
@@ -80,17 +109,13 @@ cmake --build build -j4
 
 5. **SIMD 解压**：PForDelta 当前是位循环，可替换为 AVX2/AVX512 批量解包。
 
-6. 模块重新抽象，主要是claude无法处理2W行代码中型项目,iterator, 存储， 压缩， 打分计算
+6. 除了现有 query 的补全，现在只支持 BooleanQuery / TermQuery。
 
-7. 除了现有query的补全，现在只支持boolean query, term query
+7. 支持多线程构建索引。
 
-8. 支持多线程构建索引
+8. 各种 seek 调试工具。
 
-9. Document的schema 化，去掉硬编码
-
-10. 各种seek 调试工具
-
-11. 各种索引构建、在线search优化
+9. 各种索引构建、在线 search 优化。
 
 ## 已知设计权衡
 
@@ -100,3 +125,4 @@ cmake --build build -j4
 - **legacy term_dict_**：per-field 模式下仅供兼容，新代码用 `fieldTermDict(field)`
 - **跨字段位置偏移**：修改 Schema 字段顺序会影响位置分布，需重建索引
 - **旧搜索接口**：`IndexSearcher` 保留了 `deprecated` 的 `searchAND/searchOR_WAND`，实际查询已全部走 BooleanQuery/Scorer 树
+- **include/ shim**：tests/tools 中仍有旧路径 include（如 `"postings/pfor_delta.h"`），通过 `include/` 下的 shim 文件重定向到模块头文件；`include/query/` 已删除（路径前缀相同无法重定向，直接用模块头文件）
