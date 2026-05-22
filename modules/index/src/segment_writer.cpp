@@ -61,40 +61,37 @@ std::unordered_map<DocId, uint32_t> SegmentWriter::computeFieldDocLens(const InM
     return lens;
 }
 
-float SegmentWriter::calcMaxTfNorm(const PostingList& pl,
-                                   const std::unordered_map<DocId, uint32_t>& doc_lens,
-                                   float avgdl) {
+SegmentWriter::TfNormMap SegmentWriter::calcTfNorms(
+    const InMemoryIndex&                         idx,
+    const std::unordered_map<DocId, uint32_t>&   doc_lens,
+    float                                        avgdl)
+{
     const float k1 = 1.2f, b = 0.75f;
-    float max_norm = 0.0f;
-    for (const auto& e : pl.entries()) {
-        float tf = static_cast<float>(e.tf);
-        float dl = (avgdl > 0.f && doc_lens.count(e.doc_id))
-                   ? static_cast<float>(doc_lens.at(e.doc_id)) : avgdl;
-        float denom = tf + k1 * (1.0f - b + b * (avgdl > 0.f ? dl / avgdl : 1.0f));
-        max_norm = std::max(max_norm, tf * (k1 + 1.0f) / denom);
-    }
-    return max_norm;
-}
+    constexpr size_t BLOCK_SIZE = 128;
 
-std::vector<float> SegmentWriter::calcBlockMaxTfNorms(const PostingList& pl,
-                                                       const std::unordered_map<DocId, uint32_t>& doc_lens,
-                                                       float avgdl) {
-    const float k1 = 1.2f, b = 0.75f;
-    constexpr int BLOCK_SIZE = 128;
-    const auto& entries = pl.entries();
-    std::vector<float> result;
-    result.reserve((entries.size() + BLOCK_SIZE - 1) / BLOCK_SIZE);
-    for (size_t i = 0; i < entries.size(); i += BLOCK_SIZE) {
-        size_t end = std::min(i + (size_t)BLOCK_SIZE, entries.size());
-        float max_norm = 0.0f;
-        for (size_t j = i; j < end; ++j) {
-            float tf = static_cast<float>(entries[j].tf);
-            float dl = (avgdl > 0.f && doc_lens.count(entries[j].doc_id))
-                       ? static_cast<float>(doc_lens.at(entries[j].doc_id)) : avgdl;
-            float denom = tf + k1 * (1.0f - b + b * (avgdl > 0.f ? dl / avgdl : 1.0f));
-            max_norm = std::max(max_norm, tf * (k1 + 1.0f) / denom);
+    TfNormMap result;
+    for (const auto& [term, pl] : idx.postingLists()) {
+        const auto& entries = pl.entries();
+        float global_max = 0.0f;
+        std::vector<float> block_norms;
+        block_norms.reserve((entries.size() + BLOCK_SIZE - 1) / BLOCK_SIZE);
+
+        for (size_t i = 0; i < entries.size(); i += BLOCK_SIZE) {
+            size_t end = std::min(i + BLOCK_SIZE, entries.size());
+            float block_max = 0.0f;
+            for (size_t j = i; j < end; ++j) {
+                const auto& e = entries[j];
+                float tf  = static_cast<float>(e.tf);
+                float dl  = (avgdl > 0.f && doc_lens.count(e.doc_id))
+                            ? static_cast<float>(doc_lens.at(e.doc_id)) : avgdl;
+                float norm = tf * (k1 + 1.0f) /
+                             (tf + k1 * (1.0f - b + b * (avgdl > 0.f ? dl / avgdl : 1.0f)));
+                block_max = std::max(block_max, norm);
+            }
+            block_norms.push_back(block_max);
+            global_max = std::max(global_max, block_max);
         }
-        result.push_back(max_norm);
+        result.emplace(term, std::make_pair(global_max, std::move(block_norms)));
     }
     return result;
 }
@@ -133,13 +130,16 @@ SegmentWriteStats SegmentWriter::flush(
         // per-doc 字段长度（doc_id → token 数），用于 b=0.75 BM25
         auto doc_lens = computeFieldDocLens(idx);
 
+        // 一次遍历所有 posting，同时算出 global max 和 per-block max
+        TfNormMap tf_norms = calcTfNorms(idx, doc_lens, avgdl);
+
         std::map<std::string, TermMeta>            term_dict;
         std::unordered_map<std::string, uint64_t>  tim_patch;
 
         // 1. 写 .tim_<field>
         {
             auto t = Clock::now();
-            writeFieldTim(field, idx, doc_lens, avgdl, term_dict, stats, tim_patch);
+            writeFieldTim(field, idx, avgdl, term_dict, stats, tim_patch, tf_norms);
             stats.tim_us    += std::chrono::duration_cast<
                                    std::chrono::microseconds>(Clock::now() - t).count();
             fstats.tim_bytes = fs::file_size(fieldPath(field, "tim"));
@@ -149,7 +149,7 @@ SegmentWriteStats SegmentWriter::flush(
         // 2. 写 .doc_<field>（含 tf 字节，seekp 回填 posting/skip/tf_data offset）
         {
             auto t = Clock::now();
-            writeFieldDoc(field, idx, doc_lens, term_dict, stats, tim_patch);
+            writeFieldDoc(field, idx, term_dict, stats, tim_patch, tf_norms);
             stats.doc_us    += std::chrono::duration_cast<
                                    std::chrono::microseconds>(Clock::now() - t).count();
             fstats.doc_bytes = fs::file_size(fieldPath(field, "doc"));
@@ -238,11 +238,11 @@ SegmentWriteStats SegmentWriter::flush(
 void SegmentWriter::writeFieldTim(
     const std::string&               field,
     const InMemoryIndex&             idx,
-    const std::unordered_map<DocId, uint32_t>& doc_lens,
     float                            avgdl,
     std::map<std::string, TermMeta>& term_dict_out,
     SegmentWriteStats&               stats,
-    std::unordered_map<std::string, uint64_t>& tim_patch_out)
+    std::unordered_map<std::string, uint64_t>& tim_patch_out,
+    const TfNormMap&                 tf_norms)
 {
     const auto& pls = idx.postingLists();
     std::ofstream f(fieldPath(field, "tim"), std::ios::binary | std::ios::trunc);
@@ -251,7 +251,7 @@ void SegmentWriter::writeFieldTim(
     writeU32(f, static_cast<uint32_t>(pls.size()));
 
     for (const auto& [term, pl] : pls) {
-        float    max_tf_norm = calcMaxTfNorm(pl, doc_lens, avgdl);
+        float    max_tf_norm = tf_norms.at(term).first;
         uint32_t df          = static_cast<uint32_t>(pl.size());
 
         stats.total_pl_entries += df;
@@ -292,19 +292,11 @@ void SegmentWriter::writeFieldTim(
 void SegmentWriter::writeFieldDoc(
     const std::string&               field,
     const InMemoryIndex&             idx,
-    const std::unordered_map<DocId, uint32_t>& doc_lens,
     std::map<std::string, TermMeta>& term_dict,
     SegmentWriteStats&               stats,
-    const std::unordered_map<std::string, uint64_t>& tim_patch)
+    const std::unordered_map<std::string, uint64_t>& tim_patch,
+    const TfNormMap&                 tf_norms)
 {
-    // avgdl 从 doc_lens 重算（与 writeFieldTim 保持一致）
-    float avgdl = 0.f;
-    if (!doc_lens.empty()) {
-        uint64_t total = 0;
-        for (auto& [did, l] : doc_lens) total += l;
-        avgdl = static_cast<float>(total) / doc_lens.size();
-    }
-
     std::ofstream f(fieldPath(field, "doc"), std::ios::binary | std::ios::trunc);
     if (!f) throw std::runtime_error("Cannot open .doc_" + field + ": " + fieldPath(field, "doc"));
 
@@ -315,8 +307,8 @@ void SegmentWriter::writeFieldDoc(
     for (const auto& [term, pl] : pls) {
         auto& meta = term_dict[term];
 
-        std::vector<DocId>    doc_ids   = pl.docIds();
-        std::vector<float>    block_ubs = calcBlockMaxTfNorms(pl, doc_lens, avgdl);
+        std::vector<DocId>        doc_ids   = pl.docIds();
+        const std::vector<float>& block_ubs = tf_norms.at(term).second;
         std::vector<SkipNode> skip_nodes;
         std::vector<uint8_t>  compressed = PForDelta::compress(doc_ids, skip_nodes, block_ubs);
 

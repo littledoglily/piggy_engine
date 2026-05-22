@@ -86,16 +86,21 @@ public:
         const Schema&                               schema
     );
 
+    // term → {全局max_tf_norm, 各block max_tf_norm}
+    using TfNormMap = std::unordered_map<std::string,
+                          std::pair<float, std::vector<float>>>;
+
 private:
     void writeFieldTim(const std::string& field, const InMemoryIndex& idx,
-                       const std::unordered_map<DocId, uint32_t>& doc_lens, float avgdl,
+                       float avgdl,
                        std::map<std::string, TermMeta>& dict_out, SegmentWriteStats& stats,
-                       std::unordered_map<std::string, uint64_t>& tim_patch_out);
+                       std::unordered_map<std::string, uint64_t>& tim_patch_out,
+                       const TfNormMap& tf_norms);
 
     void writeFieldDoc(const std::string& field, const InMemoryIndex& idx,
-                       const std::unordered_map<DocId, uint32_t>& doc_lens,
                        std::map<std::string, TermMeta>& dict, SegmentWriteStats& stats,
-                       const std::unordered_map<std::string, uint64_t>& tim_patch);
+                       const std::unordered_map<std::string, uint64_t>& tim_patch,
+                       const TfNormMap& tf_norms);
 
     void writeFieldPos(const std::string& field, const InMemoryIndex& idx,
                        std::map<std::string, TermMeta>& dict,
@@ -107,11 +112,9 @@ private:
     void writeSi (const SegmentInfo& info);
 
     static std::unordered_map<DocId, uint32_t> computeFieldDocLens(const InMemoryIndex& idx);
-    static float calcMaxTfNorm(const PostingList& pl,
-                               const std::unordered_map<DocId, uint32_t>& doc_lens, float avgdl);
-    static std::vector<float> calcBlockMaxTfNorms(const PostingList& pl,
-                                                  const std::unordered_map<DocId, uint32_t>& doc_lens,
-                                                  float avgdl);
+    static TfNormMap calcTfNorms(const InMemoryIndex& idx,
+                                 const std::unordered_map<DocId, uint32_t>& doc_lens,
+                                 float avgdl);
     void writeFieldLen(const std::string& field,
                        const std::unordered_map<DocId, uint32_t>& doc_lens, uint32_t total_docs);
 
