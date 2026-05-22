@@ -111,6 +111,11 @@ target_link_libraries(test_block_max_wand inverted_index_lib)
 add_executable(test_scorer_tree_e2e  tests/query/test_scorer_tree_e2e.cpp)
 target_link_libraries(test_scorer_tree_e2e inverted_index_lib)
 
+# ── parallel 索引构建测试 ────────────────────────────────────────────────────
+add_executable(test_parallel_worker_equivalence
+    tests/parallel/test_parallel_worker_equivalence.cpp)
+target_link_libraries(test_parallel_worker_equivalence inverted_index_lib)
+
 # ── common 模块单元测试 ──────────────────────────────────────────────────────
 add_executable(test_blocking_queue   tests/common/test_blocking_queue.cpp)
 target_link_libraries(test_blocking_queue piggy_common)
