@@ -8,7 +8,8 @@
 //   --output  <path>  索引输出目录（默认 ./wiki_index）
 //   --schema  <path>  Schema JSON 文件路径（不传则优先加载 output 目录中的
 //                     schema.json，均不存在时回退 defaultSchema）
-//   --ram     <MB>    IndexWriter RAM buffer（默认 128）
+//   --workers <N>     并行构建线程数（默认 1 = 单线程 IndexWriter）
+//   --ram     <MB>    每个 Worker 的 RAM flush 阈值（默认 128）
 //   --limit   <N>     最多索引 N 篇文档（默认不限）
 //   --top     <N>     打印 posting 详情的 term 数（默认 50，按 df 降序）
 //   --verbose         同时打印 top-N 之外所有 term 的 df/ttf/UB（可能数百万行，建议重定向到文件）
@@ -18,6 +19,7 @@
 // 输出: 构建完成后打印每个 term 的 df / ttf / UB，并对 top-N 展示 posting list 样本
 
 #include "index/index_writer.h"
+#include "index/parallel_index_writer.h"
 #include "index/segment_reader.h"
 #include "field/schema.h"
 #include "core/types.h"
@@ -167,7 +169,8 @@ struct Args {
     std::string input_dir;
     std::string output_dir  = "./wiki_index";
     std::string schema_path;                   // --schema（可选）
-    float       ram_mb      = 128.0f;
+    int         workers     = 1;               // --workers（1 = 单线程）
+    float       ram_mb      = 128.0f;          // 单线程总 buffer / 多线程 per-worker flush 阈值
     uint64_t    limit       = UINT64_MAX;
     uint32_t    top         = 50;
     bool        verbose     = false;
@@ -178,6 +181,7 @@ static void usage(const char* prog) {
               << " --input <wiki_dir>"
                  " [--output <dir>]"
                  " [--schema <schema.json>]"
+                 " [--workers <N>]"
                  " [--ram <MB>]"
                  " [--limit <N>]"
                  " [--top <N>]"
@@ -189,16 +193,18 @@ static Args parseArgs(int argc, char** argv) {
     Args a;
     for (int i = 1; i < argc; ++i) {
         std::string flag = argv[i];
-        if      (flag == "--input"  && i+1 < argc) { a.input_dir   = argv[++i]; }
-        else if (flag == "--output" && i+1 < argc) { a.output_dir  = argv[++i]; }
-        else if (flag == "--schema" && i+1 < argc) { a.schema_path = argv[++i]; }
-        else if (flag == "--ram"    && i+1 < argc) { a.ram_mb      = std::stof(argv[++i]); }
-        else if (flag == "--limit"  && i+1 < argc) { a.limit       = std::stoull(argv[++i]); }
-        else if (flag == "--top"    && i+1 < argc) { a.top         = std::stoul(argv[++i]); }
-        else if (flag == "--verbose")               { a.verbose     = true; }
+        if      (flag == "--input"   && i+1 < argc) { a.input_dir   = argv[++i]; }
+        else if (flag == "--output"  && i+1 < argc) { a.output_dir  = argv[++i]; }
+        else if (flag == "--schema"  && i+1 < argc) { a.schema_path = argv[++i]; }
+        else if (flag == "--workers" && i+1 < argc) { a.workers     = std::stoi(argv[++i]); }
+        else if (flag == "--ram"     && i+1 < argc) { a.ram_mb      = std::stof(argv[++i]); }
+        else if (flag == "--limit"   && i+1 < argc) { a.limit       = std::stoull(argv[++i]); }
+        else if (flag == "--top"     && i+1 < argc) { a.top         = std::stoul(argv[++i]); }
+        else if (flag == "--verbose")                { a.verbose     = true; }
         else { usage(argv[0]); }
     }
     if (a.input_dir.empty()) usage(argv[0]);
+    if (a.workers < 1) a.workers = 1;
     return a;
 }
 
@@ -348,31 +354,88 @@ static void printBuildSummary(const BuildResult& r) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 阶段一：构建索引
+// collectSegmentStats：从磁盘文件尺寸重建 SegmentWriteStats/FFWriteStats
+// （并行模式下 Writer 不持有写统计，由此在 commit 后按需收集）
 // ─────────────────────────────────────────────────────────────────────────────
-static BuildResult buildIndex(const Args& args) {
-    // 收集所有文件路径并排序（保证确定性顺序）
-    std::vector<fs::path> files;
-    for (const auto& entry : fs::recursive_directory_iterator(args.input_dir)) {
-        if (entry.is_regular_file()) {
-            files.push_back(entry.path());
+static std::pair<ii::SegmentWriteStats, ii::FFWriteStats>
+collectSegmentStats(const std::string& dir, uint32_t seg_id)
+{
+    auto fsize = [](const std::string& p) -> uint64_t {
+        std::error_code ec;
+        auto sz = fs::file_size(p, ec);
+        return ec ? 0 : static_cast<uint64_t>(sz);
+    };
+    auto fp = [&](const std::string& ext) {
+        return dir + "/_" + std::to_string(seg_id) + "." + ext;
+    };
+
+    ii::SegmentWriteStats seg;
+    seg.segment_id = seg_id;
+
+    // doc/term 数量从 SegmentReader 读取
+    ii::SegmentReader reader(dir, seg_id);
+    seg.doc_count  = reader.docCount();
+    seg.term_count = reader.termCount();
+
+    // 各倒排文件尺寸（按字段累加）
+    for (const auto& field : reader.indexedFieldNames()) {
+        seg.tim_bytes += fsize(fp("tim_" + field));
+        seg.doc_bytes += fsize(fp("doc_" + field));
+        seg.pos_bytes += fsize(fp("pos_" + field));
+    }
+    seg.fdt_bytes = fsize(fp("fdt"));
+    seg.fdx_bytes = fsize(fp("fdx"));
+    seg.liv_bytes = fsize(fp("liv"));
+    seg.si_bytes  = fsize(fp("si"));
+
+    // FastField 文件：扫描 _N.ff_* 前缀
+    ii::FFWriteStats ff;
+    const std::string ff_prefix = "_" + std::to_string(seg_id) + ".ff_";
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        const std::string name = entry.path().filename().string();
+        if (name.size() > ff_prefix.size() &&
+            name.substr(0, ff_prefix.size()) == ff_prefix) {
+            uint64_t sz = fsize(entry.path().string());
+            ff.file_bytes[name.substr(ff_prefix.size())] = sz;
+            ff.total_bytes += sz;
         }
     }
-    std::sort(files.begin(), files.end());
 
-    std::cout << "[Build] Found " << files.size() << " file(s) in "
-              << args.input_dir << "\n";
-    std::cout << "[Build] Output dir : " << args.output_dir
-              << "  RAM buffer: " << args.ram_mb << " MB\n";
+    return {seg, ff};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 共用：收集输入文件列表 + 打印开头信息
+// ─────────────────────────────────────────────────────────────────────────────
+static std::vector<fs::path> collectInputFiles(const Args& args) {
+    std::vector<fs::path> files;
+    for (const auto& entry : fs::recursive_directory_iterator(args.input_dir))
+        if (entry.is_regular_file())
+            files.push_back(entry.path());
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+static void printBuildHeader(const Args& args, size_t n_files) {
+    std::cout << "[Build] Found " << n_files << " file(s) in " << args.input_dir << "\n";
+    if (args.workers > 1)
+        std::cout << "[Build] Mode       : parallel  workers=" << args.workers
+                  << "  ram_per_worker=" << args.ram_mb << " MB\n";
+    else
+        std::cout << "[Build] Mode       : single-thread  ram_buffer=" << args.ram_mb << " MB\n";
+    std::cout << "[Build] Output dir : " << args.output_dir << "\n";
     if (args.limit != UINT64_MAX)
         std::cout << "[Build] Doc limit  : " << args.limit << "\n";
     std::cout << std::string(60, '-') << "\n";
+}
 
-    // ── 加载 Schema，创建 IndexWriter ─────────────────────────────────────────
-    ii::Schema schema = loadSchema(args);
-    printSchema(schema);
-    std::cout << std::string(60, '-') << "\n";
-
+// ─────────────────────────────────────────────────────────────────────────────
+// 阶段一A：单线程构建（IndexWriter，stats 完整）
+// ─────────────────────────────────────────────────────────────────────────────
+static BuildResult buildIndexSingle(const Args& args,
+                                    const std::vector<fs::path>& files,
+                                    const ii::Schema& schema)
+{
     ii::IndexWriter writer(args.output_dir, args.ram_mb, schema);
 
     BuildResult result;
@@ -380,66 +443,140 @@ static BuildResult buildIndex(const Args& args) {
     uint64_t& skip_count = result.skip_count;
     uint64_t file_count  = 0;
     auto t_start = Clock::now();
-    auto t_last  = t_start;
 
     for (const auto& path : files) {
         if (doc_count >= args.limit) break;
-
         std::ifstream f(path);
-        if (!f) {
-            std::cerr << "[WARN] Cannot open: " << path << "\n";
-            continue;
-        }
+        if (!f) { std::cerr << "[WARN] Cannot open: " << path << "\n"; continue; }
 
         std::string line;
         while (std::getline(f, line)) {
             if (doc_count >= args.limit) break;
             if (line.empty()) continue;
-
-            // 跳过无可索引文本内容的文档
             if (!hasIndexableContent(line, schema)) { ++skip_count; continue; }
 
             ii::Document doc;
-            doc.doc_id = static_cast<ii::DocId>(doc_count + 1);  // 1-indexed
+            doc.doc_id = static_cast<ii::DocId>(doc_count + 1);
             doc.ext_id = static_cast<uint64_t>(extractJsonInt64(line, "id"));
             populateDocument(doc, line, schema);
-
             writer.addDocument(doc);
             ++doc_count;
 
             if (doc_count % 1000 == 0) {
-                auto now = Clock::now();
+                auto now    = Clock::now();
                 double elapsed = std::chrono::duration<double>(now - t_start).count();
-                double rate    = doc_count / elapsed;
                 std::cout << "\r[Build] " << std::setw(8) << doc_count
                           << " docs  |  " << std::fixed << std::setprecision(0)
-                          << rate << " docs/s  |  "
+                          << doc_count / elapsed << " docs/s  |  "
                           << std::setprecision(1) << elapsed << "s elapsed   "
                           << std::flush;
-                t_last = now;
             }
         }
         ++file_count;
     }
 
-    std::cout << "\n";
-    std::cout << "[Build] Committing index...\n";
+    std::cout << "\n[Build] Committing index...\n";
     writer.commit();
 
-    result.elapsed_s  = std::chrono::duration<double>(Clock::now() - t_start).count();
-    result.seg_stats  = writer.segStatsHistory();
-    result.ff_stats   = writer.ffStatsHistory();
+    result.elapsed_s = std::chrono::duration<double>(Clock::now() - t_start).count();
+    result.seg_stats = writer.segStatsHistory();
+    result.ff_stats  = writer.ffStatsHistory();
 
-    std::cout << "[Build] Done.\n";
-    std::cout << "[Build] Files processed : " << file_count << "\n";
-    std::cout << "[Build] Docs indexed    : " << doc_count << "\n";
-    std::cout << "[Build] Docs skipped    : " << skip_count << " (no indexable content)\n";
-    std::cout << "[Build] Total time      : " << std::fixed << std::setprecision(2)
-              << result.elapsed_s << "s\n";
-    std::cout << "[Build] Throughput      : " << std::setprecision(0)
+    std::cout << "[Build] Done.\n"
+              << "[Build] Files processed : " << file_count << "\n"
+              << "[Build] Docs indexed    : " << doc_count << "\n"
+              << "[Build] Docs skipped    : " << skip_count << " (no indexable content)\n"
+              << "[Build] Total time      : " << std::fixed << std::setprecision(2)
+              << result.elapsed_s << "s\n"
+              << "[Build] Throughput      : " << std::setprecision(0)
               << (doc_count / result.elapsed_s) << " docs/s\n";
-
     return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 阶段一B：并行构建（ParallelIndexWriter，stats 从磁盘重建）
+// ─────────────────────────────────────────────────────────────────────────────
+static BuildResult buildIndexParallel(const Args& args,
+                                      const std::vector<fs::path>& files,
+                                      const ii::Schema& schema)
+{
+    ii::ParallelIndexWriter writer(args.output_dir, args.workers, args.ram_mb, schema);
+
+    BuildResult result;
+    uint64_t& doc_count  = result.doc_count;
+    uint64_t& skip_count = result.skip_count;
+    uint64_t file_count  = 0;
+    auto t_start = Clock::now();
+
+    for (const auto& path : files) {
+        if (doc_count >= args.limit) break;
+        std::ifstream f(path);
+        if (!f) { std::cerr << "[WARN] Cannot open: " << path << "\n"; continue; }
+
+        std::string line;
+        while (std::getline(f, line)) {
+            if (doc_count >= args.limit) break;
+            if (line.empty()) continue;
+            if (!hasIndexableContent(line, schema)) { ++skip_count; continue; }
+
+            ii::Document doc;
+            // doc.doc_id 由 ParallelIndexWriter 内部原子分配，无需手动设置
+            doc.ext_id = static_cast<uint64_t>(extractJsonInt64(line, "id"));
+            populateDocument(doc, line, schema);
+            writer.addDocument(std::move(doc));
+            ++doc_count;
+
+            if (doc_count % 1000 == 0) {
+                auto now     = Clock::now();
+                double elapsed = std::chrono::duration<double>(now - t_start).count();
+                std::cout << "\r[Build] " << std::setw(8) << doc_count
+                          << " docs  |  " << std::fixed << std::setprecision(0)
+                          << doc_count / elapsed << " docs/s  |  "
+                          << std::setprecision(1) << elapsed << "s elapsed   "
+                          << std::flush;
+            }
+        }
+        ++file_count;
+    }
+
+    std::cout << "\n[Build] Committing index...\n";
+    writer.commit();
+
+    result.elapsed_s = std::chrono::duration<double>(Clock::now() - t_start).count();
+
+    // commit 后从磁盘重建 stats（含文件大小，不含写耗时）
+    for (uint32_t sid : writer.segmentIds()) {
+        auto [seg, ff] = collectSegmentStats(args.output_dir, sid);
+        result.seg_stats.push_back(seg);
+        result.ff_stats.push_back(ff);
+    }
+
+    std::cout << "[Build] Done.\n"
+              << "[Build] Files processed : " << file_count << "\n"
+              << "[Build] Docs indexed    : " << doc_count << "\n"
+              << "[Build] Docs skipped    : " << skip_count << " (no indexable content)\n"
+              << "[Build] Total time      : " << std::fixed << std::setprecision(2)
+              << result.elapsed_s << "s\n"
+              << "[Build] Throughput      : " << std::setprecision(0)
+              << (doc_count / result.elapsed_s) << " docs/s\n";
+    return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 阶段一：构建索引（dispatcher）
+// ─────────────────────────────────────────────────────────────────────────────
+static BuildResult buildIndex(const Args& args) {
+    auto files = collectInputFiles(args);
+    printBuildHeader(args, files.size());
+
+    ii::Schema schema = loadSchema(args);
+    printSchema(schema);
+    std::cout << std::string(60, '-') << "\n";
+
+    if (args.workers <= 1)
+        return buildIndexSingle(args, files, schema);
+    else
+        return buildIndexParallel(args, files, schema);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
