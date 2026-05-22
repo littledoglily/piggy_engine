@@ -1,7 +1,7 @@
 // tests/schema/test_schema.cpp
 // Schema 单元测试：枚举转换、字段查询、持久化、defaultSchema
 #include "../../tests/test_utils.h"
-#include "schema/schema.h"
+#include "field/schema.h"
 
 #include <filesystem>
 #include <cassert>

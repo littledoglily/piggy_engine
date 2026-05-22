@@ -1,11 +1,11 @@
 // tests/fastfield/test_fast_field.cpp
 // FastField 列存读写、范围过滤、IndexWriter 集成测试
 #include "../../tests/test_utils.h"
-#include "fastfield/fast_field_writer.h"
-#include "fastfield/fast_field_reader.h"
-#include "core/index_writer.h"
+#include "field/fast_field_writer.h"
+#include "field/fast_field_reader.h"
+#include "index/index_writer.h"
 #include "query/index_searcher.h"
-#include "types.h"
+#include "core/types.h"
 
 #include <filesystem>
 #include <cassert>

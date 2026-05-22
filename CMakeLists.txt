@@ -21,7 +21,7 @@ add_subdirectory(modules/store)
 add_subdirectory(modules/index)
 add_subdirectory(modules/query)
 
-# Umbrella interface library: links all modules + exposes legacy include/ shims
+# Umbrella interface library: links all modules
 add_library(inverted_index_lib INTERFACE)
 target_link_libraries(inverted_index_lib INTERFACE
     piggy_query
@@ -32,8 +32,6 @@ target_link_libraries(inverted_index_lib INTERFACE
     piggy_codec
     piggy_core
 )
-# Legacy include/ shims (tests/tools that still use old-path headers)
-target_include_directories(inverted_index_lib INTERFACE include)
 
 # ── main demo ────────────────────────────────────────────────────
 add_executable(demo tools/demo.cpp)

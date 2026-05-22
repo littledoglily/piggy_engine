@@ -4,10 +4,10 @@
 // 每个测试在 /tmp/test_pi_<suffix> 下独立建段，测试结束清理。
 // 正确性基准：readPostingList() 的结果（全量解压后的升序 doc_id 列表）。
 
-#include "postings/posting_iterator.h"
-#include "segment/segment_reader.h"
-#include "core/index_writer.h"
-#include "tokenizer/analyzer.h"
+#include "store/posting_iterator.h"
+#include "index/segment_reader.h"
+#include "index/index_writer.h"
+#include "analysis/analyzer.h"
 #include "../test_utils.h"
 
 #include <filesystem>

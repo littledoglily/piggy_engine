@@ -1,6 +1,6 @@
-#include "segment/segment_merger.h"
-#include "segment/segment_reader.h"
-#include "core/index_writer.h"
+#include "index/segment_merger.h"
+#include "index/segment_reader.h"
+#include "index/index_writer.h"
 #include "query/index_searcher.h"
 #include "../test_utils.h"
 #include <iostream>

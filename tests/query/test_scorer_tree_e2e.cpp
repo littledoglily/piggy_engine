@@ -24,10 +24,10 @@
 #include "query/wand_scorer.h"
 #include "query/exclusion_scorer.h"
 #include "query/scorer_context.h"
-#include "segment/segment_reader.h"
-#include "segment/segment_merger.h"
-#include "core/index_writer.h"
-#include "tokenizer/analyzer.h"
+#include "index/segment_reader.h"
+#include "index/segment_merger.h"
+#include "index/index_writer.h"
+#include "analysis/analyzer.h"
 #include "../test_utils.h"
 
 #include <filesystem>

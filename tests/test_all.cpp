@@ -1,14 +1,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // test_all.cpp  —  单元测试（无第三方框架，仅 assert）
 // ─────────────────────────────────────────────────────────────────────────────
-#include "tokenizer/analyzer.h"
-#include "postings/pfor_delta.h"
-#include "postings/skiplist.h"
-#include "postings/posting_list.h"
+#include "analysis/analyzer.h"
+#include "codec/pfor_delta.h"
+#include "codec/skiplist.h"
+#include "store/posting_list.h"
 #include <filesystem>
-#include "core/index_writer.h"
+#include "index/index_writer.h"
 #include "query/index_searcher.h"
-#include "segment/segment_merger.h"
+#include "index/segment_merger.h"
 #include <cassert>
 #include <iostream>
 #include <numeric>

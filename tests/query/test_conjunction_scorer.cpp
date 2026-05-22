@@ -15,9 +15,9 @@
 #include "query/conjunction_scorer.h"
 #include "query/term_scorer.h"
 #include "query/scorer_context.h"
-#include "segment/segment_reader.h"
-#include "core/index_writer.h"
-#include "tokenizer/analyzer.h"
+#include "index/segment_reader.h"
+#include "index/index_writer.h"
+#include "analysis/analyzer.h"
 #include "../test_utils.h"
 
 #include <filesystem>

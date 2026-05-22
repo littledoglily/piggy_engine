@@ -1,5 +1,5 @@
-#include "postings/pfor_delta.h"
-#include "postings/skiplist.h"
+#include "codec/pfor_delta.h"
+#include "codec/skiplist.h"
 #include "../test_utils.h"
 #include <iostream>
 #include <vector>

@@ -8,11 +8,11 @@
 //   4. Merge 验证：mergeAll() 后 per-field 文件保留且 df 正确
 //   5. Legacy 兼容：default schema 的旧接口（deprecated API）仍能访问 per-field 数据
 
-#include "core/index_writer.h"
-#include "segment/segment_reader.h"
-#include "segment/segment_merger.h"
+#include "index/index_writer.h"
+#include "index/segment_reader.h"
+#include "index/segment_merger.h"
 #include "query/index_searcher.h"
-#include "schema/schema.h"
+#include "field/schema.h"
 #include "../test_utils.h"
 
 #include <filesystem>

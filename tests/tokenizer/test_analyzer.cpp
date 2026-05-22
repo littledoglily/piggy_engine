@@ -1,4 +1,4 @@
-#include "tokenizer/analyzer.h"
+#include "analysis/analyzer.h"
 #include "../test_utils.h"
 #include <iostream>
 

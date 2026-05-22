@@ -1,4 +1,4 @@
-#include "postings/posting_list.h"
+#include "store/posting_list.h"
 #include "../test_utils.h"
 #include <iostream>
 #include <vector>
