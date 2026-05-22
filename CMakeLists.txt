@@ -14,6 +14,7 @@ set(CMAKE_CXX_FLAGS_DEBUG   "-g -O0 -DDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 
 add_subdirectory(modules/core)
+add_subdirectory(modules/common)
 add_subdirectory(modules/codec)
 add_subdirectory(modules/analysis)
 add_subdirectory(modules/field)
@@ -109,6 +110,16 @@ target_link_libraries(test_block_max_wand inverted_index_lib)
 
 add_executable(test_scorer_tree_e2e  tests/query/test_scorer_tree_e2e.cpp)
 target_link_libraries(test_scorer_tree_e2e inverted_index_lib)
+
+# ── common 模块单元测试 ──────────────────────────────────────────────────────
+add_executable(test_blocking_queue   tests/common/test_blocking_queue.cpp)
+target_link_libraries(test_blocking_queue piggy_common)
+
+add_executable(test_thread_pool      tests/common/test_thread_pool.cpp)
+target_link_libraries(test_thread_pool piggy_common)
+
+add_executable(test_kway_merge       tests/common/test_kway_merge.cpp)
+target_link_libraries(test_kway_merge piggy_common)
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")
