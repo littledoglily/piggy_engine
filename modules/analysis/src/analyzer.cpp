@@ -1,7 +1,6 @@
 #include "analysis/analyzer.h"
 #include <algorithm>
 #include <cctype>
-#include <sstream>
 
 namespace ii {
 
@@ -87,10 +86,13 @@ std::string Analyzer::charFilter(const std::string& text) const {
 
 std::vector<std::string> Analyzer::tokenize(const std::string& text) const {
     std::vector<std::string> tokens;
-    std::istringstream iss(text);
-    std::string tok;
-    while (iss >> tok) {
-        tokens.push_back(tok);
+    const char* p   = text.data();
+    const char* end = p + text.size();
+    while (p < end) {
+        while (p < end && *p == ' ') ++p;
+        const char* start = p;
+        while (p < end && *p != ' ') ++p;
+        if (p > start) tokens.emplace_back(start, p);
     }
     return tokens;
 }
