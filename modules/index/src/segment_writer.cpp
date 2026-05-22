@@ -242,18 +242,15 @@ void SegmentWriter::writeFieldTim(
     std::map<std::string, TermMeta>& term_dict_out,
     SegmentWriteStats&               stats)
 {
-    auto terms = idx.sortedTerms();
+    const auto& pls = idx.postingLists();
     std::ofstream f(fieldPath(field, "tim"), std::ios::binary | std::ios::trunc);
     if (!f) throw std::runtime_error("Cannot open .tim_" + field + ": " + fieldPath(field, "tim"));
 
-    writeU32(f, static_cast<uint32_t>(terms.size()));
+    writeU32(f, static_cast<uint32_t>(pls.size()));
 
-    for (const auto& term : terms) {
-        const PostingList* pl = idx.getPostingList(term);
-        if (!pl) continue;
-
-        float    max_tf_norm = calcMaxTfNorm(*pl, doc_lens, avgdl);
-        uint32_t df          = static_cast<uint32_t>(pl->size());
+    for (const auto& [term, pl] : pls) {
+        float    max_tf_norm = calcMaxTfNorm(pl, doc_lens, avgdl);
+        uint32_t df          = static_cast<uint32_t>(pl.size());
 
         stats.total_pl_entries += df;
         if (df > stats.max_pl_df) {
@@ -263,7 +260,7 @@ void SegmentWriter::writeFieldTim(
 
         TermMeta meta;
         meta.doc_freq        = df;
-        meta.total_term_freq = pl->totalTermFreq();
+        meta.total_term_freq = pl.totalTermFreq();
         meta.posting_offset  = 0;
         meta.skip_offset     = 0;
         meta.pos_offset      = 0;
@@ -305,18 +302,15 @@ void SegmentWriter::writeFieldDoc(
     std::ofstream f(fieldPath(field, "doc"), std::ios::binary | std::ios::trunc);
     if (!f) throw std::runtime_error("Cannot open .doc_" + field + ": " + fieldPath(field, "doc"));
 
-    uint32_t term_count = static_cast<uint32_t>(term_dict.size());
+    const auto& pls = idx.postingLists();
+    uint32_t term_count = static_cast<uint32_t>(pls.size());
     writeU32(f, term_count);
 
-    auto terms = idx.sortedTerms();
-    for (const auto& term : terms) {
-        const PostingList* pl = idx.getPostingList(term);
-        if (!pl) continue;
-
+    for (const auto& [term, pl] : pls) {
         auto& meta = term_dict[term];
 
-        std::vector<DocId>    doc_ids   = pl->docIds();
-        std::vector<float>    block_ubs = calcBlockMaxTfNorms(*pl, doc_lens, avgdl);
+        std::vector<DocId>    doc_ids   = pl.docIds();
+        std::vector<float>    block_ubs = calcBlockMaxTfNorms(pl, doc_lens, avgdl);
         std::vector<SkipNode> skip_nodes;
         std::vector<uint8_t>  compressed = PForDelta::compress(doc_ids, skip_nodes, block_ubs);
 
@@ -339,7 +333,7 @@ void SegmentWriter::writeFieldDoc(
 
         // tf 字节数组：每个 doc 一个 uint8_t（saturate at 255），按 posting 顺序
         meta.tf_data_offset = static_cast<uint64_t>(f.tellp());
-        for (const auto& e : pl->entries()) {
+        for (const auto& e : pl.entries()) {
             uint8_t tf_byte = static_cast<uint8_t>(std::min((uint32_t)e.tf, 255u));
             f.write(reinterpret_cast<const char*>(&tf_byte), 1);
         }
@@ -349,9 +343,7 @@ void SegmentWriter::writeFieldDoc(
     {
         std::ofstream ftim(fieldPath(field, "tim"), std::ios::binary | std::ios::trunc);
         writeU32(ftim, term_count);
-        for (const auto& term : terms) {
-            const PostingList* pl2 = idx.getPostingList(term);
-            if (!pl2) continue;
+        for (const auto& [term, pl] : pls) {
             const auto& m = term_dict[term];
             writeStr(ftim, term);
             writeU32(ftim, m.doc_freq);
@@ -383,14 +375,11 @@ void SegmentWriter::writeFieldPos(
     std::ofstream f(fieldPath(field, "pos"), std::ios::binary | std::ios::trunc);
     if (!f) throw std::runtime_error("Cannot open .pos_" + field + ": " + fieldPath(field, "pos"));
 
-    auto terms = idx.sortedTerms();
-    for (const auto& term : terms) {
-        const PostingList* pl = idx.getPostingList(term);
-        if (!pl) continue;
-
+    const auto& pls = idx.postingLists();
+    for (const auto& [term, pl] : pls) {
         term_dict[term].pos_offset = static_cast<uint64_t>(f.tellp());
 
-        for (const auto& entry : pl->entries()) {
+        for (const auto& entry : pl.entries()) {
             writeU32(f, entry.doc_id);
             writeU32(f, entry.tf);
             for (Pos p : entry.positions)
@@ -403,9 +392,7 @@ void SegmentWriter::writeFieldPos(
         uint32_t term_count = static_cast<uint32_t>(term_dict.size());
         std::ofstream ftim(fieldPath(field, "tim"), std::ios::binary | std::ios::trunc);
         writeU32(ftim, term_count);
-        for (const auto& term : terms) {
-            const PostingList* pl2 = idx.getPostingList(term);
-            if (!pl2) continue;
+        for (const auto& [term, pl] : pls) {
             const auto& m = term_dict[term];
             writeStr(ftim, term);
             writeU32(ftim, m.doc_freq);
