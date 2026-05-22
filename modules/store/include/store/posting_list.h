@@ -35,6 +35,8 @@ public:
     void   setDocCount(size_t n) { doc_count_ = n; }
     size_t ramUsage()  const { return ram_bytes_; }
 
+    const std::unordered_map<std::string, PostingList>& postingLists() const { return index_; }
+
 private:
     std::unordered_map<std::string, PostingList> index_;
     size_t doc_count_ = 0;

@@ -88,11 +88,11 @@ public:
 
 private:
     void writeFieldTim(const std::string& field, const InMemoryIndex& idx,
-                       const std::map<DocId, uint32_t>& doc_lens, float avgdl,
+                       const std::unordered_map<DocId, uint32_t>& doc_lens, float avgdl,
                        std::map<std::string, TermMeta>& dict_out, SegmentWriteStats& stats);
 
     void writeFieldDoc(const std::string& field, const InMemoryIndex& idx,
-                       const std::map<DocId, uint32_t>& doc_lens,
+                       const std::unordered_map<DocId, uint32_t>& doc_lens,
                        std::map<std::string, TermMeta>& dict, SegmentWriteStats& stats);
 
     void writeFieldPos(const std::string& field, const InMemoryIndex& idx,
@@ -103,14 +103,14 @@ private:
     void writeLiv(uint32_t doc_count);
     void writeSi (const SegmentInfo& info);
 
-    static std::map<DocId, uint32_t> computeFieldDocLens(const InMemoryIndex& idx);
+    static std::unordered_map<DocId, uint32_t> computeFieldDocLens(const InMemoryIndex& idx);
     static float calcMaxTfNorm(const PostingList& pl,
-                               const std::map<DocId, uint32_t>& doc_lens, float avgdl);
+                               const std::unordered_map<DocId, uint32_t>& doc_lens, float avgdl);
     static std::vector<float> calcBlockMaxTfNorms(const PostingList& pl,
-                                                  const std::map<DocId, uint32_t>& doc_lens,
+                                                  const std::unordered_map<DocId, uint32_t>& doc_lens,
                                                   float avgdl);
     void writeFieldLen(const std::string& field,
-                       const std::map<DocId, uint32_t>& doc_lens, uint32_t total_docs);
+                       const std::unordered_map<DocId, uint32_t>& doc_lens, uint32_t total_docs);
 
     std::string path     (const std::string& ext) const;
     std::string fieldPath(const std::string& field, const std::string& ext) const;

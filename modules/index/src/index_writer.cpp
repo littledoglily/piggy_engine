@@ -82,6 +82,7 @@ void IndexWriter::flush() {
     if (!any_data) return;
 
     // per-field avg_doc_len
+    // 计算每个field的平均文档长度（token数），用于 BM25 中 b=0.75 的长度归一化 
     std::map<std::string, float> field_avg_doc_lens;
     for (const auto& [field, cnt] : field_token_counts_) {
         field_avg_doc_lens[field] = total_docs_ > 0

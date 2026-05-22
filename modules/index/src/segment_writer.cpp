@@ -52,19 +52,17 @@ std::string SegmentWriter::fieldPath(const std::string& field,
 // BM25 辅助
 // ─────────────────────────────────────────────────────────────────────────────
 
-std::map<DocId, uint32_t> SegmentWriter::computeFieldDocLens(const InMemoryIndex& idx) {
-    std::map<DocId, uint32_t> lens;
-    for (const auto& term : idx.sortedTerms()) {
-        const PostingList* pl = idx.getPostingList(term);
-        if (!pl) continue;
-        for (const auto& e : pl->entries())
+std::unordered_map<DocId, uint32_t> SegmentWriter::computeFieldDocLens(const InMemoryIndex& idx) {
+    std::unordered_map<DocId, uint32_t> lens;
+    for (const auto& [_, pl] : idx.postingLists()) {
+        for (const auto& e : pl.entries())
             lens[e.doc_id] += e.tf;
     }
     return lens;
 }
 
 float SegmentWriter::calcMaxTfNorm(const PostingList& pl,
-                                   const std::map<DocId, uint32_t>& doc_lens,
+                                   const std::unordered_map<DocId, uint32_t>& doc_lens,
                                    float avgdl) {
     const float k1 = 1.2f, b = 0.75f;
     float max_norm = 0.0f;
@@ -79,7 +77,7 @@ float SegmentWriter::calcMaxTfNorm(const PostingList& pl,
 }
 
 std::vector<float> SegmentWriter::calcBlockMaxTfNorms(const PostingList& pl,
-                                                       const std::map<DocId, uint32_t>& doc_lens,
+                                                       const std::unordered_map<DocId, uint32_t>& doc_lens,
                                                        float avgdl) {
     const float k1 = 1.2f, b = 0.75f;
     constexpr int BLOCK_SIZE = 128;
@@ -239,7 +237,7 @@ SegmentWriteStats SegmentWriter::flush(
 void SegmentWriter::writeFieldTim(
     const std::string&               field,
     const InMemoryIndex&             idx,
-    const std::map<DocId, uint32_t>& doc_lens,
+    const std::unordered_map<DocId, uint32_t>& doc_lens,
     float                            avgdl,
     std::map<std::string, TermMeta>& term_dict_out,
     SegmentWriteStats&               stats)
@@ -292,7 +290,7 @@ void SegmentWriter::writeFieldTim(
 void SegmentWriter::writeFieldDoc(
     const std::string&               field,
     const InMemoryIndex&             idx,
-    const std::map<DocId, uint32_t>& doc_lens,
+    const std::unordered_map<DocId, uint32_t>& doc_lens,
     std::map<std::string, TermMeta>& term_dict,
     SegmentWriteStats&               stats)
 {
@@ -427,7 +425,7 @@ void SegmentWriter::writeFieldPos(
 // ─────────────────────────────────────────────────────────────────────────────
 
 void SegmentWriter::writeFieldLen(const std::string& field,
-                                  const std::map<DocId, uint32_t>& doc_lens,
+                                  const std::unordered_map<DocId, uint32_t>& doc_lens,
                                   uint32_t total_docs)
 {
     std::ofstream f(fieldPath(field, "len"), std::ios::binary | std::ios::trunc);
