@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <stdexcept>
 
 namespace ii {
@@ -78,7 +79,7 @@ void ParallelIndexWriter::addDocument(Document&& doc) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// commit：关闭队列 → 等待 Worker → 汇总 SegId → 写 segments 文件
+// commit：关闭队列 → 等待 Worker → K-way 合并临时 Segment → 写 segments 文件
 // ─────────────────────────────────────────────────────────────────────────────
 
 void ParallelIndexWriter::commit() {
@@ -91,23 +92,51 @@ void ParallelIndexWriter::commit() {
     // 2. join 所有 Worker 线程
     stopAndJoin();
 
-    // 3. 汇总所有 Worker 产出的 Segment ID
+    // 3. 汇总所有 Worker 产出的临时 Segment ID
+    std::vector<uint32_t> temp_seg_ids;
+    uint32_t worker_total_docs = 0;
     for (const auto& w : workers_) {
         for (uint32_t id : w->flushedSegIds())
-            final_seg_ids_.push_back(id);
+            temp_seg_ids.push_back(id);
+        worker_total_docs += w->docCount();
     }
-    std::sort(final_seg_ids_.begin(), final_seg_ids_.end());
+    std::sort(temp_seg_ids.begin(), temp_seg_ids.end());
 
-    uint32_t total = totalDocs();
-    std::cout << "[ParallelIndexWriter] Committed. total_docs=" << total
-              << " segments=" << final_seg_ids_.size() << " ids=[";
-    for (size_t i = 0; i < final_seg_ids_.size(); ++i) {
+    std::cout << "[ParallelIndexWriter] Workers done."
+              << " total_docs=" << worker_total_docs
+              << " temp_segments=" << temp_seg_ids.size() << " ids=[";
+    for (size_t i = 0; i < temp_seg_ids.size(); ++i) {
         if (i) std::cout << ',';
-        std::cout << final_seg_ids_[i];
+        std::cout << temp_seg_ids[i];
     }
     std::cout << "]\n";
 
-    // 4. 写 segments_N 文件（N = 产出 Segment 总数，与 IndexWriter 保持一致）
+    // 4. K-way 合并
+    if (temp_seg_ids.empty()) {
+        // 没有任何文档，不产生 Segment
+        std::cout << "[ParallelIndexWriter] No data, skipping merge.\n";
+        writeSegmentsFile();
+        return;
+    }
+
+    if (temp_seg_ids.size() == 1) {
+        // 只有 1 个 Segment，无需合并
+        final_seg_ids_ = temp_seg_ids;
+        std::cout << "[ParallelIndexWriter] Single segment, skipping merge.\n";
+    } else {
+        // 多个 Segment：K-way 合并 → 1 个最终 Segment
+        uint32_t final_id = g_next_seg_id_.fetch_add(1, std::memory_order_relaxed);
+        std::cout << "[ParallelIndexWriter] Merging " << temp_seg_ids.size()
+                  << " segments → seg=" << final_id << " ...\n";
+
+        SegmentMerger merger(dir_, temp_seg_ids);
+        merger.mergeAll(final_id);           // 合并、清理临时文件、更新 readers_
+        final_seg_ids_ = {final_id};
+
+        std::cout << "[ParallelIndexWriter] Merge complete → seg=" << final_id << "\n";
+    }
+
+    // 5. 写 segments_N 文件（覆盖 Merger 写的版本，保持格式统一）
     writeSegmentsFile();
 }
 
@@ -136,6 +165,25 @@ void ParallelIndexWriter::writeSegmentsFile() {
         f << "segment_" << id << "\n";
 
     std::cout << "[ParallelIndexWriter] Wrote " << path << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 调试辅助：查询所有 Worker 临时产出的 seg_ids
+// ─────────────────────────────────────────────────────────────────────────────
+
+size_t ParallelIndexWriter::workerTempSegCount() const {
+    size_t n = 0;
+    for (const auto& w : workers_) n += w->flushedSegIds().size();
+    return n;
+}
+
+std::vector<uint32_t> ParallelIndexWriter::allWorkerSegIds() const {
+    std::vector<uint32_t> ids;
+    for (const auto& w : workers_)
+        for (uint32_t id : w->flushedSegIds())
+            ids.push_back(id);
+    std::sort(ids.begin(), ids.end());
+    return ids;
 }
 
 } // namespace ii

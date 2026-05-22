@@ -116,6 +116,22 @@ add_executable(test_parallel_worker_equivalence
     tests/parallel/test_parallel_worker_equivalence.cpp)
 target_link_libraries(test_parallel_worker_equivalence inverted_index_lib)
 
+add_executable(test_parallel_no_conflict
+    tests/parallel/test_parallel_no_conflict.cpp)
+target_link_libraries(test_parallel_no_conflict inverted_index_lib)
+
+add_executable(test_segment_merge_subset
+    tests/parallel/test_segment_merge_subset.cpp)
+target_link_libraries(test_segment_merge_subset inverted_index_lib)
+
+add_executable(test_parallel_commit
+    tests/parallel/test_parallel_commit.cpp)
+target_link_libraries(test_parallel_commit inverted_index_lib)
+
+add_executable(test_parallel_e2e
+    tests/parallel/test_parallel_e2e.cpp)
+target_link_libraries(test_parallel_e2e inverted_index_lib)
+
 # ── common 模块单元测试 ──────────────────────────────────────────────────────
 add_executable(test_blocking_queue   tests/common/test_blocking_queue.cpp)
 target_link_libraries(test_blocking_queue piggy_common)

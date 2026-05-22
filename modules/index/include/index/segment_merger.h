@@ -26,7 +26,11 @@ struct MergeStats {
 
 class SegmentMerger {
 public:
+    // 扫描目录，加载所有 .si 文件对应的 Segment
     explicit SegmentMerger(const std::string& dir);
+
+    // 仅加载指定 seg_ids 的 Segment（K-way 合并用）
+    SegmentMerger(const std::string& dir, const std::vector<uint32_t>& seg_ids);
 
     bool softDelete(DocId doc_id);
     int  softDeleteBatch(const std::vector<DocId>& doc_ids);

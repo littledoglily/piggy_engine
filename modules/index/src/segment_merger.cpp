@@ -52,6 +52,16 @@ SegmentMerger::SegmentMerger(const std::string& dir) : dir_(dir) {
     }
 }
 
+SegmentMerger::SegmentMerger(const std::string& dir,
+                               const std::vector<uint32_t>& seg_ids)
+    : dir_(dir), seg_ids_(seg_ids)
+{
+    std::sort(seg_ids_.begin(), seg_ids_.end());
+    for (uint32_t id : seg_ids_) {
+        readers_.push_back(std::make_unique<SegmentReader>(dir_, id));
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 软删除：在所有 Segment 中找到 doc_id 并在 .liv 中标记
 // ─────────────────────────────────────────────────────────────────────────────

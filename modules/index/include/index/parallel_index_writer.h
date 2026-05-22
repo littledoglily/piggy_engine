@@ -15,6 +15,7 @@
 #include "field/schema.h"
 #include "field/field_descriptor.h"
 #include "index/segment_writer.h"
+#include "index/segment_merger.h"
 #include <atomic>
 #include <memory>
 #include <string>
@@ -43,13 +44,19 @@ public:
     void addDocument(Document&& doc);
 
     // 关闭队列 → 等待所有 Worker 结束 → 写 segments_N 文件
+    // 关闭队列 → 等待所有 Worker 结束 → K-way 合并所有临时 Segment → 写 segments 文件
     void commit();
 
     uint32_t totalDocs()    const { return g_next_doc_id_.load() - 1; }
     uint32_t segmentCount() const { return final_seg_ids_.size(); }
 
-    // 所有已产出的 Segment ID（commit() 后有效）
+    // 最终 Segment ID 列表（commit() 后有效；合并后通常只有 1 个）
     const std::vector<uint32_t>& segmentIds() const { return final_seg_ids_; }
+
+    // commit() 前可查询各 Worker 产出的临时 Segment 数量（调试用）
+    size_t workerTempSegCount() const;
+    // 返回所有 Worker 的临时 seg_ids（commit() 前调用才有意义）
+    std::vector<uint32_t> allWorkerSegIds() const;
 
 private:
     void startWorkers();

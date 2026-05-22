@@ -462,3 +462,31 @@ FastField 文件是数组格式，doc index 必须连续。Worker 各自写本�
 | 内存峰值 = N * ram_threshold | 文档建议 ram_per_worker = total_ram / (N+1)，留 1 份给合并 |
 | K-way merge 时 Segment 数量过多 | 限制 max_segments_before_merge，超过时在 commit 前做一轮 intermediate merge |
 | 写索引与搜索并发 | ParallelIndexWriter 不解决在线读写并发，搜索仍需在 commit() 完成后重新打开 IndexSearcher |
+
+---
+
+## 10. 已知问题（待 parallel_index_build 所有 Step 完成后优化）
+
+### 10.1 SegmentMerger::doMerge 内存峰值过高
+
+**问题**：按 1500 万文档估算，`doMerge` 总内存峰值约 **10–17 GB**，主因如下：
+
+| 来源 | 估算（1500万文档，body 平均 300B） | 说明 |
+|---|---|---|
+| SegmentReader × N（fdx + len + tim + liv）| ~380 MB | 随 input segment 数线性增长 |
+| `alive_docs.str_fields`（所有文档原文同时驻留）| **~8.5 GB** | **最大瓶颈** |
+| `remap`（`unordered_map<uint64_t, DocId>`）| ~760 MB | 链式哈希节点开销大 |
+| `merged_doc_lens`（`std::map<DocId, uint32_t>`，每字段重建）| ~720 MB | 红黑树节点 ~48B/条 |
+| `merged_pos` 瞬时峰（高频词）| ~10–50 MB | 按 term 释放，可接受 |
+
+**根本原因**：`alive_docs` 同时承担"remap 辅助"和"原文存储"两个职责，字段原文从 Step1 一直压到 Step5 写完 `.fdt` 才释放。
+
+**待实施优化**：
+
+1. **`GlobalDoc` 去掉 `str_fields`**：只保留 `(seg_id, orig_doc_id, new_doc_id)`，写 `.fdt` 时按序 seek 原始 `.fdt` 读一条写一条，峰值降至 O(1) per doc。节省 ~8 GB。
+
+2. **`merged_doc_lens` 改为 `vector<uint32_t>`**：按 new_doc_id 下标访问（output_doc_count 在 remap 建完后已知），从 `std::map` 的 ~48B/条降到 4B/条。节省 ~660 MB。
+
+3. **`remap` 改为排序数组 + 二分查找**（可选）：`vector<pair<uint64_t, DocId>>` 排序后二分，节省链式哈希节点开销，约节省 ~400 MB；代价是构造时需要排序 O(N log N)。
+
+优化后预估峰值：**~1.5 GB**（主要剩 remap + reader 本身 + merged_doc_lens vector）。
