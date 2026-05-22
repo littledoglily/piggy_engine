@@ -155,26 +155,26 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
     std::cout << "] → segment " << new_segment_id << "\n";
 
     // ── Step1: 统计存活文档，建立全局 doc_id 重映射表 ─────────────────────────
-    // 格式：seg_id × old_local_doc_id → new_global_doc_id
-    // 重映射去掉被软删除的 doc，重新从 1 连续编号
+    // GlobalDoc 只存元数据，不存储字段原文（避免 O(N×doc_size) 内存峰值）：
+    //   orig_doc_id : .fdt 中记录的全局 doc_id（供 remap / fieldDocLen 查询）
+    //   local_pos   : segment 内 1-indexed 位置（供 readStoredDoc 惰性读 / FastField 索引）
+    //   new_doc_id  : 合并后分配的新 doc_id（避免 Step5/Step8 重复 remap 查询）
     struct GlobalDoc {
-        uint32_t    seg_id;
-        DocId       orig_doc_id;
-        uint64_t    ext_id = 0;
-        std::unordered_map<std::string, std::string> str_fields;
+        uint32_t seg_id;
+        DocId    orig_doc_id;  // .fdt 存储的全局 doc_id
+        uint32_t local_pos;    // 1-indexed segment 内位置
+        DocId    new_doc_id;   // 合并后新 doc_id
     };
     std::vector<GlobalDoc> alive_docs;
 
     uint32_t total_input  = 0;
     uint32_t total_deleted= 0;
 
-    // 为每个 (seg_id, local_doc_id) 分配新 global_doc_id
-    // key = (seg_id << 20) | local_doc_id  (假设 local_doc_id < 2^20)
+    // key = (seg_id << 20) | orig_doc_id，与 posting list 中的 doc_id 对齐
     std::unordered_map<uint64_t, DocId> remap;
 
     DocId new_id = 1;
     for (uint32_t sid : src_ids) {
-        // 找到对应 reader
         SegmentReader* reader = nullptr;
         for (auto& r : readers_) {
             if (r->segmentId() == sid) { reader = r.get(); break; }
@@ -189,16 +189,11 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                 ++total_deleted;
                 continue;
             }
-            // 存活：用 .fdt 中存储的原始 doc_id 作为 key，与 .pos 保持一致
+            // 只读 orig_doc_id（4B），不读 str_fields
             auto stored = reader->readStoredDoc(local);
             uint64_t key = ((uint64_t)sid << 20) | stored.doc_id;
             remap[key] = new_id;
-            GlobalDoc gd;
-            gd.seg_id      = sid;
-            gd.orig_doc_id = stored.doc_id;
-            gd.ext_id      = stored.ext_id;
-            gd.str_fields  = stored.str_fields;
-            alive_docs.push_back(std::move(gd));
+            alive_docs.push_back({sid, stored.doc_id, local, new_id});
             ++new_id;
         }
     }
@@ -259,24 +254,20 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         if (field_terms.empty()) continue;
 
         // 2b-pre. 计算合并后 per-doc 字段长度 和 avgdl（用于 BM25 UB 重算）
-        std::map<DocId, uint32_t> merged_doc_lens;
+        // 用 vector 代替 map：4B/doc vs 48B/doc，1500万文档省 ~660MB
+        std::vector<uint32_t> merged_doc_lens(output_doc_count + 1, 0); // 下标 = new_doc_id
+        uint64_t total_field_len = 0;
         for (const auto& gd : alive_docs) {
             SegmentReader* reader = nullptr;
             for (auto& r : readers_)
                 if (r->segmentId() == gd.seg_id) { reader = r.get(); break; }
             if (!reader) continue;
-            uint64_t key = ((uint64_t)gd.seg_id << 20) | gd.orig_doc_id;
-            auto it = remap.find(key);
-            if (it == remap.end()) continue;
             uint32_t dl = reader->fieldDocLen(field, gd.orig_doc_id);
-            merged_doc_lens[it->second] = dl;
+            merged_doc_lens[gd.new_doc_id] = dl;
+            total_field_len += dl;
         }
-        float merged_avgdl = 0.f;
-        if (!merged_doc_lens.empty()) {
-            uint64_t total_len = 0;
-            for (auto& [did, l] : merged_doc_lens) total_len += l;
-            merged_avgdl = (float)total_len / (float)merged_doc_lens.size();
-        }
+        float merged_avgdl = output_doc_count > 0
+            ? (float)total_field_len / (float)output_doc_count : 0.f;
 
         // 2b. 打开输出文件
         std::ofstream fdoc(segFieldPath(new_segment_id, field, "doc"),
@@ -335,7 +326,8 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
             float max_tn = 0.f;
             for (auto& [did, tf] : merged) {
                 float tf_f = (float)tf;
-                float dl   = (float)merged_doc_lens.count(did) ? (float)merged_doc_lens[did] : merged_avgdl;
+                uint32_t raw = (did < merged_doc_lens.size()) ? merged_doc_lens[did] : 0;
+                float dl   = (raw > 0) ? (float)raw : merged_avgdl;
                 float denom = tf_f + k1 * (1.f - b + b * (merged_avgdl > 0.f ? dl / merged_avgdl : 1.f));
                 max_tn = std::max(max_tn, tf_f * (k1 + 1.f) / denom);
             }
@@ -353,8 +345,9 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                 float blk_max = 0.f;
                 for (size_t j = bi; j < bend; ++j) {
                     float tf_f = (float)merged[j].second;
-                    float dl   = (float)merged_doc_lens.count(merged[j].first)
-                                 ? (float)merged_doc_lens[merged[j].first] : merged_avgdl;
+                    DocId jdid = merged[j].first;
+                    uint32_t raw = (jdid < merged_doc_lens.size()) ? merged_doc_lens[jdid] : 0;
+                    float dl   = (raw > 0) ? (float)raw : merged_avgdl;
                     float denom = tf_f + k1 * (1.f - b + b * (merged_avgdl > 0.f ? dl / merged_avgdl : 1.f));
                     blk_max = std::max(blk_max, tf_f * (k1 + 1.f) / denom);
                 }
@@ -419,7 +412,7 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                                std::ios::binary|std::ios::trunc);
             wU32(flen, output_doc_count);
             for (DocId new_doc = 1; new_doc <= output_doc_count; ++new_doc) {
-                uint16_t l = merged_doc_lens.count(new_doc)
+                uint16_t l = (new_doc < merged_doc_lens.size())
                              ? (uint16_t)std::min(merged_doc_lens[new_doc], 65535u) : 0u;
                 flen.write((char*)&l, 2);
             }
@@ -430,18 +423,23 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                   << field_terms.size() << " terms merged\n";
     }
 
-    // ── Step5: 写新 .fdt / .fdx（合并后的文档原文）───────────────────────────
+    // ── Step5: 写新 .fdt / .fdx（惰性读：每条文档临时读取，常数内存）────────────
     std::vector<uint64_t> fdx_offsets;
     {
         std::ofstream ffdt(segPath(new_segment_id, "fdt"),
                            std::ios::binary|std::ios::trunc);
         for (const auto& gd : alive_docs) {
+            SegmentReader* reader = nullptr;
+            for (auto& r : readers_)
+                if (r->segmentId() == gd.seg_id) { reader = r.get(); break; }
+
+            // 从原始 .fdt 惰性读一条，处理完即释放
+            auto stored = reader->readStoredDoc(gd.local_pos);
             fdx_offsets.push_back((uint64_t)ffdt.tellp());
-            DocId new_doc_id = remap[((uint64_t)gd.seg_id << 20) | gd.orig_doc_id];
-            wU32(ffdt, new_doc_id);
-            wU64(ffdt, gd.ext_id);
-            wU32(ffdt, (uint32_t)gd.str_fields.size());
-            for (const auto& [name, val] : gd.str_fields) {
+            wU32(ffdt, gd.new_doc_id);
+            wU64(ffdt, stored.ext_id);
+            wU32(ffdt, (uint32_t)stored.str_fields.size());
+            for (const auto& [name, val] : stored.str_fields) {
                 wStr(ffdt, name);
                 wStr(ffdt, val);
             }
@@ -495,7 +493,7 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
             for (auto& r : readers_) {
                 if (r->segmentId() == gd.seg_id) { reader = r.get(); break; }
             }
-            uint32_t idx = gd.orig_doc_id - 1;  // 0-indexed
+            uint32_t idx = gd.local_pos - 1;  // 0-indexed segment 内位置
             for (const auto* fs : schema.fastFields()) {
                 if (!reader || !reader->hasFastField()) {
                     if (fs->type == FieldType::Int64)   ff_writer.addInt64  (fs->name, 0);

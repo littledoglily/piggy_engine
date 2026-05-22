@@ -481,12 +481,16 @@ FastField 文件是数组格式，doc index 必须连续。Worker 各自写本�
 
 **根本原因**：`alive_docs` 同时承担"remap 辅助"和"原文存储"两个职责，字段原文从 Step1 一直压到 Step5 写完 `.fdt` 才释放。
 
-**待实施优化**：
+**已完成优化（2025-05-22）**：
 
-1. **`GlobalDoc` 去掉 `str_fields`**：只保留 `(seg_id, orig_doc_id, new_doc_id)`，写 `.fdt` 时按序 seek 原始 `.fdt` 读一条写一条，峰值降至 O(1) per doc。节省 ~8 GB。
+1. ✅ **`GlobalDoc` 去掉 `str_fields` / `ext_id`**：新增 `local_pos`（segment 内 1-indexed 位置）和 `new_doc_id`（预计算避免 remap 二次查询）。Step 5 写 `.fdt` 时惰性调用 `readStoredDoc(local_pos)`，单条读完即释放，峰值降至 O(1) per doc。节省 ~8 GB（300B avg × 1500万文档）。
 
-2. **`merged_doc_lens` 改为 `vector<uint32_t>`**：按 new_doc_id 下标访问（output_doc_count 在 remap 建完后已知），从 `std::map` 的 ~48B/条降到 4B/条。节省 ~660 MB。
+2. ✅ **`merged_doc_lens` 改为 `vector<uint32_t>`**：`output_doc_count` 在 Step1 完成后已知，直接预分配；下标 = new_doc_id（1-indexed），从 `std::map` 的 ~48B/条降到 4B/条。节省 ~660 MB。
 
-3. **`remap` 改为排序数组 + 二分查找**（可选）：`vector<pair<uint64_t, DocId>>` 排序后二分，节省链式哈希节点开销，约节省 ~400 MB；代价是构造时需要排序 O(N log N)。
+3. ✅ **FastField 索引改用 `local_pos - 1`**：修正并行模式下 FastField 读取以 global doc_id 作为 0-indexed 数组下标的潜在越界问题。
 
-优化后预估峰值：**~1.5 GB**（主要剩 remap + reader 本身 + merged_doc_lens vector）。
+**待考虑优化**：
+
+- **`remap` 改为排序数组 + 二分查找**（可选）：`vector<pair<uint64_t, DocId>>` 排序后二分，节省链式哈希节点开销，约节省 ~400 MB；代价是构造时需要排序 O(N log N)。
+
+优化后预估峰值：**~1.2 GB**（主要剩 remap ~760MB + SegmentReader fdx/len ~380MB）。
