@@ -70,8 +70,9 @@ std::unique_ptr<ii::IPostingIterator> MemorySegmentReader::postingIterator(
 //
 // Computes TermMeta from the hashtable Bucket:
 //   - doc_freq / total_term_freq from bucket
-//   - IDF = log(1 + (N - df + 0.5) / (df + 0.5))
-//   - upper_bound: max BM25 tf_norm × IDF  (conservative: tf = ttf, dl = 1)
+//   - upper_bound: conservative max BM25 tf_norm (dl=1, tf=max per doc)
+//     Does NOT include IDF — TermScorer multiplies IDF at query time,
+//     matching the on-disk TermMeta.upper_bound convention.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ii::TermMeta* MemorySegmentReader::getTermMeta(
@@ -87,11 +88,9 @@ const ii::TermMeta* MemorySegmentReader::getTermMeta(
 
     uint32_t df    = b->doc_freq;
     uint32_t ttf   = b->total_tf;
-    uint32_t N     = seg_.docCount();
 
-    float idf = std::log(1.0f + ((float)N - (float)df + 0.5f) / ((float)df + 0.5f));
-
-    // upper_bound: tf_norm at max tf, min dl=1
+    // upper_bound = max tf_norm across all docs (conservative: dl=1, which maximises tf_norm).
+    // IDF is NOT included here — callers (TermScorer) multiply it in at query time.
     float avg_dl = fieldAvgDocLen(field);
     if (avg_dl < 1.0f) avg_dl = 1.0f;
     float max_tf  = static_cast<float>(ttf);
@@ -101,7 +100,7 @@ const ii::TermMeta* MemorySegmentReader::getTermMeta(
     ii::TermMeta meta{};
     meta.doc_freq        = df;
     meta.total_term_freq = ttf;
-    meta.upper_bound     = tf_norm * idf;
+    meta.upper_bound     = tf_norm;
 
     auto [ins, _] = term_meta_cache_.emplace(key, meta);
     return &ins->second;

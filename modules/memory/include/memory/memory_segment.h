@@ -23,6 +23,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <memory>
 
 namespace ii::memory {
 
@@ -88,6 +89,11 @@ public:
         return descs_;
     }
 
+    // Flush to disk as a new segment at <dir>/segment_<seg_id>/.
+    // Creates .ing before writing and replaces it with .done on success.
+    // Does NOT reset() — caller must do that separately.
+    void flushToDisk(const std::string& dir, uint32_t seg_id) const;
+
     // reset 供 flush 后复用（清空所有状态）
     void reset();
 
@@ -121,6 +127,8 @@ private:
     std::unordered_map<std::string, uint64_t> field_total_tokens_;
     // doc_id → StoredPage chain head (for stored-field retrieval)
     std::unordered_map<ii::DocId, uint32_t>   stored_heads_;
+    // doc_id → external id (for .fdt ext_id field)
+    std::unordered_map<ii::DocId, uint64_t>   doc_ext_ids_;
 
     // arena 中至少要为一篇文档预留的空间（估算：最大文档 ~100 term，每 term 2 pages）
     static constexpr size_t MIN_RESERVE_BYTES = 64 * 1024;
