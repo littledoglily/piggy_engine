@@ -146,6 +146,10 @@ add_executable(test_term_hash_table
     tests/memory/test_term_hash_table.cpp)
 target_link_libraries(test_term_hash_table piggy_memory)
 
+add_executable(test_memory_segment_write
+    tests/memory/test_memory_segment_write.cpp)
+target_link_libraries(test_memory_segment_write piggy_memory inverted_index_lib)
+
 # ── common 模块单元测试 ──────────────────────────────────────────────────────
 add_executable(test_blocking_queue   tests/common/test_blocking_queue.cpp)
 target_link_libraries(test_blocking_queue piggy_common)
