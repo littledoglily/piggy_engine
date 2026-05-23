@@ -5,10 +5,7 @@
 // 使用方式与 IndexWriter 基本一致，差异：
 //   - addDocument 接受 Document&&（移动语义，避免字符串深拷贝）
 //   - doc_id 由内部全局原子计数器分配，调用方无需设置
-//   - commit() 会等待所有 Worker 完成，并写出 segments_N 文件
-//
-// Step 2 版本：Worker 各自独立产出 Segment，commit() 直接将所有 Segment
-//             写入 segments 文件，不做 K-way 合并（Step 5 引入合并）
+//   - commit() 等待所有 Worker 完成，K-way 合并所有临时 Segment 为一个
 // ─────────────────────────────────────────────────────────────────────────────
 #include "common/blocking_queue.h"
 #include "common/doc_ref.h"
@@ -43,8 +40,7 @@ public:
     // 队列满时阻塞调用方（背压）
     void addDocument(Document&& doc);
 
-    // 关闭队列 → 等待所有 Worker 结束 → 写 segments_N 文件
-    // 关闭队列 → 等待所有 Worker 结束 → K-way 合并所有临时 Segment → 写 segments 文件
+    // 关闭队列 → 等待所有 Worker 结束 → K-way 合并所有临时 Segment
     void commit();
 
     uint32_t totalDocs()    const { return g_next_doc_id_.load() - 1; }
@@ -61,7 +57,6 @@ public:
 private:
     void startWorkers();
     void stopAndJoin();
-    void writeSegmentsFile();
 
     // ── 配置 ─────────────────────────────────────────────────────────────────
     std::string dir_;

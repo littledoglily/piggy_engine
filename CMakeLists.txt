@@ -132,6 +132,10 @@ add_executable(test_parallel_e2e
     tests/parallel/test_parallel_e2e.cpp)
 target_link_libraries(test_parallel_e2e inverted_index_lib)
 
+add_executable(test_parallel_merge_fanout
+    tests/parallel/test_parallel_merge_fanout.cpp)
+target_link_libraries(test_parallel_merge_fanout inverted_index_lib)
+
 # ── common 模块单元测试 ──────────────────────────────────────────────────────
 add_executable(test_blocking_queue   tests/common/test_blocking_queue.cpp)
 target_link_libraries(test_blocking_queue piggy_common)

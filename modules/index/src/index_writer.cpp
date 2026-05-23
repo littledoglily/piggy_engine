@@ -176,15 +176,6 @@ void IndexWriter::printFlushStats(const SegmentWriteStats& seg,
 
 void IndexWriter::commit() {
     flush();
-
-    std::string seg_file = dir_ + "/segments_" + std::to_string(next_seg_id_);
-    std::ofstream f(seg_file, std::ios::trunc);
-    if (!f) throw std::runtime_error("Cannot write segments_N");
-
-    f << "segment_count=" << next_seg_id_ << "\n";
-    for (uint32_t i = 0; i < next_seg_id_; ++i) {
-        f << "segment_" << i << "\n";
-    }
     std::cout << "[IndexWriter] Committed. Segments: " << next_seg_id_ << "\n";
 }
 

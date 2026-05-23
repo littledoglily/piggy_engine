@@ -6,8 +6,32 @@
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
+#include <cmath>
+#include <thread>
 
 namespace ii {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 并行 merge 辅助函数
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 根据 temp segment 总数和 worker 数决定并行 merge 的分组数
+static int computeGroupCount(size_t total, int n_workers) {
+    if (total <= 8) return 1;
+    int n = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(total))));
+    return std::min(n, n_workers);
+}
+
+// 将 ids 均匀切分成 n_groups 组（轮询分配，每组大小差 ≤ 1）
+static std::vector<std::vector<uint32_t>>
+splitIntoGroups(const std::vector<uint32_t>& ids, int n_groups) {
+    n_groups = std::min(n_groups, static_cast<int>(ids.size()));
+    if (n_groups <= 1) return {ids};
+    std::vector<std::vector<uint32_t>> groups(n_groups);
+    for (size_t i = 0; i < ids.size(); ++i)
+        groups[i % static_cast<size_t>(n_groups)].push_back(ids[i]);
+    return groups;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 构造
@@ -115,7 +139,6 @@ void ParallelIndexWriter::commit() {
     if (temp_seg_ids.empty()) {
         // 没有任何文档，不产生 Segment
         std::cout << "[ParallelIndexWriter] No data, skipping merge.\n";
-        writeSegmentsFile();
         return;
     }
 
@@ -124,20 +147,42 @@ void ParallelIndexWriter::commit() {
         final_seg_ids_ = temp_seg_ids;
         std::cout << "[ParallelIndexWriter] Single segment, skipping merge.\n";
     } else {
-        // 多个 Segment：K-way 合并 → 1 个最终 Segment
-        uint32_t final_id = g_next_seg_id_.fetch_add(1, std::memory_order_relaxed);
+        // 按 total 大小自动决策分组数，各组并行 merge
+        int n_groups = computeGroupCount(temp_seg_ids.size(), n_workers_);
+        auto groups  = splitIntoGroups(temp_seg_ids, n_groups);
+
         std::cout << "[ParallelIndexWriter] Merging " << temp_seg_ids.size()
-                  << " segments → seg=" << final_id << " ...\n";
+                  << " temp segments → " << groups.size()
+                  << " group(s) (parallel)...\n";
 
-        SegmentMerger merger(dir_, temp_seg_ids);
-        merger.mergeAll(final_id);           // 合并、清理临时文件、更新 readers_
-        final_seg_ids_ = {final_id};
+        // 预先分配所有输出 ID，避免 merge 线程内部竞争
+        std::vector<uint32_t> out_ids;
+        out_ids.reserve(groups.size());
+        for (size_t i = 0; i < groups.size(); ++i)
+            out_ids.push_back(g_next_seg_id_.fetch_add(1, std::memory_order_relaxed));
 
-        std::cout << "[ParallelIndexWriter] Merge complete → seg=" << final_id << "\n";
+        // 各组并行 merge
+        std::vector<std::thread> merge_threads;
+        merge_threads.reserve(groups.size());
+        for (size_t i = 0; i < groups.size(); ++i) {
+            merge_threads.emplace_back([this, grp = groups[i], oid = out_ids[i]] {
+                SegmentMerger merger(dir_, grp);
+                merger.mergeAll(oid);
+            });
+        }
+        for (auto& t : merge_threads) t.join();
+
+        final_seg_ids_ = out_ids;
+        std::sort(final_seg_ids_.begin(), final_seg_ids_.end());
+
+        std::cout << "[ParallelIndexWriter] Merge complete → final segs=[";
+        for (size_t i = 0; i < final_seg_ids_.size(); ++i) {
+            if (i) std::cout << ',';
+            std::cout << final_seg_ids_[i];
+        }
+        std::cout << "]\n";
     }
 
-    // 5. 写 segments_N 文件（覆盖 Merger 写的版本，保持格式统一）
-    writeSegmentsFile();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,22 +195,6 @@ void ParallelIndexWriter::stopAndJoin() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// writeSegmentsFile
-// ─────────────────────────────────────────────────────────────────────────────
-
-void ParallelIndexWriter::writeSegmentsFile() {
-    uint32_t gen = static_cast<uint32_t>(final_seg_ids_.size());
-    std::string path = dir_ + "/segments_" + std::to_string(gen);
-    std::ofstream f(path, std::ios::trunc);
-    if (!f) throw std::runtime_error("Cannot write segments file: " + path);
-
-    f << "segment_count=" << gen << "\n";
-    for (uint32_t id : final_seg_ids_)
-        f << "segment_" << id << "\n";
-
-    std::cout << "[ParallelIndexWriter] Wrote " << path << "\n";
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 调试辅助：查询所有 Worker 临时产出的 seg_ids

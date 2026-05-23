@@ -494,3 +494,100 @@ FastField 文件是数组格式，doc index 必须连续。Worker 各自写本�
 - **`remap` 改为排序数组 + 二分查找**（可选）：`vector<pair<uint64_t, DocId>>` 排序后二分，节省链式哈希节点开销，约节省 ~400 MB；代价是构造时需要排序 O(N log N)。
 
 优化后预估峰值：**~1.2 GB**（主要剩 remap ~760MB + SegmentReader fdx/len ~380MB）。
+
+---
+
+## 11. 并行 Merge 优化（方案 A：Parallel Fan-out Merge）
+
+### 11.1 问题背景
+
+当前 `commit()` 的最后一步是**单线程**把所有临时 Segment 合并成 1 个：
+
+```
+20 workers × 2 flushes = 40 temp segments
+→ 1 个 SegmentMerger 串行合并全部 40 个 → 1 个最终 Segment
+```
+
+这一步完全没有并行度，是整个并行构建流程的唯一单线程瓶颈。
+
+### 11.2 方案对比
+
+| 方案 | 描述 | 优点 | 缺点 |
+|------|------|------|------|
+| **A（选定）** | 并行 first-pass：分 n_groups 组同时 merge → 保留多个最终 Segment | 实现最简单；IndexSearcher 已原生支持多 Segment | 搜索时需访问多个 Segment（数量小时影响可忽略）|
+| B | 两级树形 merge：并行 → M 中间 Segment → 串行 → 1 个 | 最终只有 1 个 Segment，搜索最优 | 多一轮 merge 延迟；实现复杂 |
+| C（当前）| 全量串行：所有 temp → 1 个 | 搜索性能最优 | merge 是单线程瓶颈 |
+
+### 11.3 方案 A 设计
+
+**核心思路**：把 N 个 temp segments 切分成 K 组，各组并行由独立 `SegmentMerger` 实例处理，产出 K 个最终 Segment。`SegmentMerger` 各实例操作不同文件，天然无竞争。
+
+**分组策略**（自动决策）：
+
+```
+total_temp ≤ 8                 → 1 组（沿用当前行为，开销已很小）
+8 < total_temp ≤ 64            → n_groups = ceil(sqrt(total_temp))
+total_temp > 64                → n_groups = n_workers_
+每组 fan-in 上限 = 8           → 避免单次 merge 打开文件句柄过多
+```
+
+示例：20 workers × 2 flushes = 40 temp segs
+- `ceil(sqrt(40)) = 7` 组，每组约 6 个 temp segs
+- 7 个线程并行 merge → 7 个最终 Segment
+- `IndexSearcher` 加载 7 个 Segment，正常搜索
+
+**关键约束**：每组产出的 Segment 使用全局原子 `g_next_seg_id_` 分配 ID，仍然唯一无冲突。
+
+### 11.4 改动范围
+
+仅修改 `ParallelIndexWriter::commit()`，其他模块不变：
+
+```cpp
+// 原来：
+SegmentMerger merger(dir_, all_temp_ids);
+merger.mergeAll(final_id);
+final_seg_ids_ = {final_id};
+
+// 改为：
+auto groups = splitIntoGroups(all_temp_ids, computeGroupCount(all_temp_ids.size()));
+std::vector<std::thread> merge_threads;
+for (auto& group : groups) {
+    uint32_t out_id = g_next_seg_id_.fetch_add(1, std::memory_order_relaxed);
+    final_seg_ids_.push_back(out_id);
+    merge_threads.emplace_back([this, group, out_id] {
+        SegmentMerger merger(dir_, group);
+        merger.mergeAll(out_id);
+    });
+}
+for (auto& t : merge_threads) t.join();
+```
+
+**新增辅助函数**（均在 `parallel_index_writer.cpp` 内部）：
+
+```cpp
+// 自动计算分组数
+static int computeGroupCount(size_t total, int n_workers);
+
+// 将 seg_ids 均匀切分成 n_groups 组（尽量等长，余数分配到前几组）
+static std::vector<std::vector<uint32_t>>
+splitIntoGroups(const std::vector<uint32_t>& ids, int n_groups);
+```
+
+### 11.5 测试计划
+
+新增 `tests/parallel/test_parallel_merge_fanout.cpp`，验证维度：
+
+| 测试 | 验证内容 |
+|------|---------|
+| `split_groups_even` | 40 segs → 7 组，各组大小差 ≤ 1 |
+| `split_groups_small` | ≤ 8 segs → 1 组（退化到当前行为）|
+| `parallel_merge_doc_count` | 40 temp segs 并行 merge 后总 doc_count 不变 |
+| `parallel_merge_term_stats` | 各最终 Segment 的 term df 之和 == 单线程参考 |
+| `searcher_multi_final_seg` | IndexSearcher 加载多个最终 Segment，查询结果与单线程建索引一致 |
+| `no_seg_id_collision` | 所有最终 Segment ID 唯一，不与 temp IDs 重叠 |
+
+### 11.6 已知权衡
+
+- **搜索开销**：K 个最终 Segment 时，每个 TermQuery 需访问 K 个 posting list 并归并。K ≤ 8 时影响可忽略；如需最优搜索性能，可在 wiki_searcher 启动前手动触发一次 `SegmentMerger::mergeAll()`。
+- **不实现两级 merge**：第二次串行 merge 换来的单 Segment 收益，对 wiki 全量构建场景不值得增加该复杂度；搜索层已能透明处理多 Segment。
+- **实现时机**：暂不实现，待需要时按本节设计直接动手。

@@ -53,7 +53,6 @@ private:
     );
 
     void deleteSegmentFiles(uint32_t seg_id);
-    void writeSegmentsFile(const std::vector<uint32_t>& active_ids, uint32_t generation);
 
     std::string segPath     (uint32_t seg_id, const std::string& ext) const;
     std::string segFieldPath(uint32_t seg_id, const std::string& field,

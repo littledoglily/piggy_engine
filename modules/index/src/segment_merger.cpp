@@ -538,11 +538,6 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
         ff_writer.flush(dir_, new_segment_id);
     }
 
-    // ── Step9: 原子更新 segments_N 注册表 ────────────────────────────────────
-    // 找当前最大 generation
-    uint32_t max_gen = new_segment_id;
-    writeSegmentsFile({new_segment_id}, max_gen + 1);
-
     // ── Step9: 删除旧 Segment 文件 ────────────────────────────────────────────
     for (uint32_t sid : src_ids) {
         deleteSegmentFiles(sid);
@@ -600,21 +595,6 @@ void SegmentMerger::deleteSegmentFiles(uint32_t seg_id) {
             std::cout << "[Merger] Removed " << entry.path().string() << "\n";
         std::filesystem::remove_all(seg_dir, ec);
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// writeSegmentsFile：写 segments_N 注册表
-// ─────────────────────────────────────────────────────────────────────────────
-
-void SegmentMerger::writeSegmentsFile(const std::vector<uint32_t>& active_ids,
-                                       uint32_t generation)
-{
-    std::string path = dir_ + "/segments_" + std::to_string(generation);
-    std::ofstream f(path, std::ios::trunc);
-    f << "generation=" << generation << "\n";
-    f << "segment_count=" << active_ids.size() << "\n";
-    for (uint32_t id : active_ids) f << "segment_" << id << "\n";
-    std::cout << "[Merger] Updated " << path << "\n";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
