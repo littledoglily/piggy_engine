@@ -529,7 +529,7 @@ std::vector<PostingEntry> SegmentReader::readPosEntries(const std::string& term)
 // readStoredDoc：从 .fdt 读取文档原文
 // ─────────────────────────────────────────────────────────────────────────────
 
-SegmentReader::StoredDocResult SegmentReader::readStoredDoc(DocId doc_id) const {
+StoredDocResult SegmentReader::readStoredDoc(DocId doc_id) const {
     StoredDocResult r;
     if (doc_id == 0 || doc_id >= fdx_offsets_.size()) return r;
 

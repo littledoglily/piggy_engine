@@ -158,6 +158,14 @@ add_executable(test_memory_flush
     tests/memory/test_memory_flush.cpp)
 target_link_libraries(test_memory_flush piggy_memory inverted_index_lib)
 
+add_executable(test_realtime_searcher
+    tests/memory/test_realtime_searcher.cpp)
+target_link_libraries(test_realtime_searcher piggy_memory inverted_index_lib)
+
+add_executable(test_realtime_concurrent
+    tests/memory/test_realtime_concurrent.cpp)
+target_link_libraries(test_realtime_concurrent piggy_memory inverted_index_lib)
+
 # ── common 模块单元测试 ──────────────────────────────────────────────────────
 add_executable(test_blocking_queue   tests/common/test_blocking_queue.cpp)
 target_link_libraries(test_blocking_queue piggy_common)

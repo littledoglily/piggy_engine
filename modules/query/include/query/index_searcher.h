@@ -4,16 +4,18 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "core/types.h"
 #include "analysis/analyzer.h"
+#include "index/i_segment_reader.h"
 #include "index/segment_reader.h"
 #include "query/query.h"
 #include "query/query_parser.h"
 #include "query/wand_scorer.h"
-#include <vector>
+#include <memory>
+#include <numeric>
+#include <queue>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
-#include <memory>
-#include <queue>
-#include <numeric>
+#include <vector>
 
 namespace ii {
 
@@ -30,6 +32,14 @@ struct FieldTerm {
 class IndexSearcher {
 public:
     explicit IndexSearcher(const std::string& dir);
+
+    // ── 实时 segment 接入（Step 6/7）────────────────────────────────────────
+    //
+    // attachRealtime：将内存 segment 纳入查询。调用方负责保证 shared_ptr 的生命周期
+    // 覆盖 MemorySegment 的 arena，在所有持有该快照的 search() 返回后方可 reset()。
+    // detachRealtime：移除实时 segment（用于 flush 后切换到磁盘 segment）。
+    void attachRealtime(std::shared_ptr<const ISegmentReader> rt);
+    void detachRealtime();
 
     std::vector<SearchResult> search(
         const std::string& query,
@@ -51,17 +61,22 @@ public:
 private:
     std::vector<FieldTerm> parseQuery(const std::string& raw_query) const;
 
+    std::unordered_map<std::string, float> computeIdfsFromBQ(
+        const BooleanQuery& bq,
+        const ISegmentReader* rt  // nullptr if no realtime segment
+    ) const;
+
+    // deprecated path のみ使用（searchAND / searchOR_WAND）
     std::unordered_map<std::string, float> computeFieldTermIdfs(
         const std::vector<FieldTerm>& fterms
     ) const;
 
-    std::unordered_map<std::string, float> computeIdfsFromBQ(
-        const BooleanQuery& bq) const;
-
+    // 在单个 Segment（disk 或 memory）上驱动 Scorer 树，返回 top_k 结果。
+    // 接受 ISegmentReader 使内存 segment 可复用相同路径。
     std::vector<SearchResult> searchImpl(
         const BooleanQuery& bq,
         int top_k,
-        const SegmentReader& seg,
+        const ISegmentReader& seg,
         const std::unordered_map<std::string, float>& term_idfs,
         const NumericFilter* filter
     ) const;
@@ -89,7 +104,7 @@ private:
                    const std::unordered_map<std::string, float>& term_idfs,
                    const SegmentReader& seg) const;
 
-    bool passesFilter(const SegmentReader& seg,
+    bool passesFilter(const ISegmentReader& seg,
                       DocId doc_id,
                       const NumericFilter& filter) const;
 
@@ -115,6 +130,12 @@ private:
     mutable bool debug_ = false;
 
     std::vector<std::string> default_search_fields_;
+
+    // ── 实时 segment（Step 6/7）──────────────────────────────────────────────
+    // 通过 shared_ptr 管理生命周期：search() 在搜索开始时获取快照，
+    // 保证 arena 在本次搜索期间不被 reset（即使外部调用了 attachRealtime 换了一个新的）。
+    mutable std::shared_mutex             rt_mutex_;
+    std::shared_ptr<const ISegmentReader> rt_reader_;
 };
 
 } // namespace ii

@@ -79,24 +79,7 @@ public:
         return it != field_term_dicts_.end() ? &it->second : nullptr;
     }
 
-    // 存储层读取
-    struct StoredDocResult {
-        DocId       doc_id = 0;
-        uint64_t    ext_id = 0;
-        std::unordered_map<std::string, std::string> str_fields;
-
-        const std::string& source()   const { return get("source"); }
-        const std::string& title()    const { return get("title"); }
-        const std::string& body()     const { return get("body"); }
-        const std::string& category() const { return get("category"); }
-
-        const std::string& get(const std::string& k) const {
-            static const std::string empty;
-            auto it = str_fields.find(k);
-            return it != str_fields.end() ? it->second : empty;
-        }
-    };
-    StoredDocResult readStoredDoc(DocId doc_id) const;
+    StoredDocResult readStoredDoc(DocId doc_id) const override;
 
     uint32_t termCount() const { return static_cast<uint32_t>(term_dict_.size()); }
 

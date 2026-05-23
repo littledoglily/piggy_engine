@@ -84,6 +84,12 @@ public:
         return (it != stored_heads_.end()) ? it->second : INVALID_OFFSET;
     }
 
+    // Doc_id → external id (0 if unknown).
+    uint64_t docExtId(ii::DocId doc_id) const {
+        auto it = doc_ext_ids_.find(doc_id);
+        return (it != doc_ext_ids_.end()) ? it->second : 0;
+    }
+
     // Indexed field names, for ISegmentReader::indexedFieldNames().
     const std::vector<std::unique_ptr<ii::FieldDescriptor>>& fieldDescs() const {
         return descs_;

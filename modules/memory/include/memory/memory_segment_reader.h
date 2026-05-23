@@ -23,6 +23,7 @@
 #include "core/types.h"
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -33,7 +34,11 @@ class MemorySegmentReader : public ii::ISegmentReader {
 public:
     static constexpr uint32_t MEM_SEG_ID = 0xFFFFFFFEu;
 
+    // 非并发用途：MemorySegment 必须比此 Reader 存活更长（调用方保证）
     explicit MemorySegmentReader(const MemorySegment& seg);
+
+    // SWMR 用途（Step 7）：共享 MemorySegment 所有权，保证 arena 在所有 Reader 释放后才销毁
+    explicit MemorySegmentReader(std::shared_ptr<const MemorySegment> seg);
 
     // ── ISegmentReader ────────────────────────────────────────────────────────
 
@@ -55,15 +60,19 @@ public:
 
     bool isAlive(ii::DocId) const override { return true; }
 
+    ii::StoredDocResult readStoredDoc(ii::DocId doc_id) const override;
+
 private:
     static constexpr float BM25_K1 = 1.2f;
     static constexpr float BM25_B  = 0.75f;
 
+    // 当以 shared_ptr 构造时持有所有权，保证 MemorySegment 生命周期
+    std::shared_ptr<const MemorySegment> owned_seg_;
     const MemorySegment& seg_;
     std::vector<std::string> field_names_;
 
-    // Cache computed TermMeta (IDF / upper_bound need docCount which is stable
-    // while the reader is alive).
+    // Cache computed TermMeta. Protected by mutex for concurrent reader threads.
+    mutable std::mutex term_meta_mutex_;
     mutable std::unordered_map<std::string, ii::TermMeta> term_meta_cache_;
 };
 

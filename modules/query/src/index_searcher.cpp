@@ -200,6 +200,20 @@ float IndexSearcher::scoreDoc(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// attachRealtime / detachRealtime（Step 6/7）
+// ─────────────────────────────────────────────────────────────────────────────
+
+void IndexSearcher::attachRealtime(std::shared_ptr<const ISegmentReader> rt) {
+    std::unique_lock lock(rt_mutex_);
+    rt_reader_ = std::move(rt);
+}
+
+void IndexSearcher::detachRealtime() {
+    std::unique_lock lock(rt_mutex_);
+    rt_reader_.reset();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // search：主入口
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -208,6 +222,13 @@ std::vector<SearchResult> IndexSearcher::search(
     int                top_k,
     QueryMode          mode) const
 {
+    // 获取实时 segment 快照（引用计数保证 arena 在本次搜索期间存活）
+    std::shared_ptr<const ISegmentReader> rt;
+    {
+        std::shared_lock lock(rt_mutex_);
+        rt = rt_reader_;
+    }
+
     Occur default_occur = (mode == QueryMode::AND) ? Occur::MUST : Occur::SHOULD;
     QueryParser parser(analyzer_, default_search_fields_);
     auto bq = parser.parse(query, default_occur);
@@ -215,11 +236,13 @@ std::vector<SearchResult> IndexSearcher::search(
     std::cout << "[Search] Query: " << bq->debugString()
               << " mode=" << (mode == QueryMode::AND ? "AND" : "OR") << "\n";
 
-    auto term_idfs = computeIdfsFromBQ(*bq);
+    auto term_idfs = computeIdfsFromBQ(*bq, rt.get());
 
     std::vector<std::vector<SearchResult>> per_seg;
     for (const auto& seg : segments_)
         per_seg.push_back(searchImpl(*bq, top_k, *seg, term_idfs, nullptr));
+    if (rt)
+        per_seg.push_back(searchImpl(*bq, top_k, *rt, term_idfs, nullptr));
     return mergeTopK(per_seg, top_k);
 }
 
@@ -230,6 +253,12 @@ std::vector<SearchResult> IndexSearcher::search(
     int                  top_k,
     QueryMode            mode) const
 {
+    std::shared_ptr<const ISegmentReader> rt;
+    {
+        std::shared_lock lock(rt_mutex_);
+        rt = rt_reader_;
+    }
+
     Occur default_occur = (mode == QueryMode::AND) ? Occur::MUST : Occur::SHOULD;
     QueryParser parser(analyzer_, default_search_fields_);
     auto bq = parser.parse(query, default_occur);
@@ -237,11 +266,13 @@ std::vector<SearchResult> IndexSearcher::search(
     std::cout << "[Search+Filter] Query: " << bq->debugString()
               << " mode=" << (mode == QueryMode::AND ? "AND" : "OR") << "\n";
 
-    auto term_idfs = computeIdfsFromBQ(*bq);
+    auto term_idfs = computeIdfsFromBQ(*bq, rt.get());
 
     std::vector<std::vector<SearchResult>> per_seg;
     for (const auto& seg : segments_)
         per_seg.push_back(searchImpl(*bq, top_k, *seg, term_idfs, &filter));
+    if (rt)
+        per_seg.push_back(searchImpl(*bq, top_k, *rt, term_idfs, &filter));
 
     auto results = mergeTopK(per_seg, top_k);
     if (filter.sort_by_pubtime) {
@@ -257,7 +288,7 @@ std::vector<SearchResult> IndexSearcher::search(
 // passesFilter
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool IndexSearcher::passesFilter(const SegmentReader& seg,
+bool IndexSearcher::passesFilter(const ISegmentReader& seg,
                                   DocId doc_id,
                                   const NumericFilter& filter) const
 {
@@ -661,16 +692,17 @@ void IndexSearcher::printResults(const std::vector<SearchResult>& results) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::unordered_map<std::string, float> IndexSearcher::computeIdfsFromBQ(
-    const BooleanQuery& bq) const
+    const BooleanQuery& bq, const ISegmentReader* rt) const
 {
     std::vector<std::pair<std::string,std::string>> raw;
     bq.collectTerms(raw);
 
-    // 去重
     std::set<std::pair<std::string,std::string>> unique(raw.begin(), raw.end());
 
     std::unordered_map<std::string, float> result;
-    const float N = static_cast<float>(global_total_docs_);
+    // N 包含实时 segment 的文档数（使 IDF 更准确）
+    uint32_t rt_docs = rt ? rt->docCount() : 0;
+    const float N = static_cast<float>(global_total_docs_ + rt_docs);
 
     for (const auto& [field, term] : unique) {
         std::string key = field.empty() ? term : (field + ":" + term);
@@ -681,6 +713,12 @@ std::unordered_map<std::string, float> IndexSearcher::computeIdfsFromBQ(
             const TermMeta* m = field.empty()
                 ? seg->getTermMeta(term)
                 : seg->getTermMeta(field, term);
+            if (m) df += m->doc_freq;
+        }
+        if (rt) {
+            const TermMeta* m = field.empty()
+                ? rt->getTermMeta("", term)
+                : rt->getTermMeta(field, term);
             if (m) df += m->doc_freq;
         }
 
@@ -702,11 +740,13 @@ std::unordered_map<std::string, float> IndexSearcher::computeIdfsFromBQ(
 std::vector<SearchResult> IndexSearcher::searchImpl(
     const BooleanQuery& bq,
     int top_k,
-    const SegmentReader& seg,
+    const ISegmentReader& seg,
     const std::unordered_map<std::string, float>& term_idfs,
     const NumericFilter* filter) const
 {
-    ScorerContext ctx{seg, term_idfs, global_total_docs_, filter, top_k};
+    uint32_t total_docs = global_total_docs_;
+    // 实时 segment 不计入 total_docs（IDF 已在 computeIdfsFromBQ 中正确计算）
+    ScorerContext ctx{seg, term_idfs, total_docs, filter, top_k};
     auto root = bq.createScorer(ctx);
     if (!root) return {};
 

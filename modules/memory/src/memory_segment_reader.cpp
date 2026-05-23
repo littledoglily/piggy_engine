@@ -5,12 +5,22 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <numeric>
 
 namespace ii::memory {
 
 MemorySegmentReader::MemorySegmentReader(const MemorySegment& seg)
     : seg_(seg)
+{
+    for (const auto& desc : seg_.fieldDescs()) {
+        if (desc->indexOption() != ii::IndexOption::None)
+            field_names_.push_back(desc->name());
+    }
+}
+
+MemorySegmentReader::MemorySegmentReader(std::shared_ptr<const MemorySegment> seg)
+    : owned_seg_(std::move(seg)), seg_(*owned_seg_)
 {
     for (const auto& desc : seg_.fieldDescs()) {
         if (desc->indexOption() != ii::IndexOption::None)
@@ -80,6 +90,8 @@ const ii::TermMeta* MemorySegmentReader::getTermMeta(
 {
     std::string key = field + ":" + term;
 
+    std::lock_guard lock(term_meta_mutex_);
+
     auto it = term_meta_cache_.find(key);
     if (it != term_meta_cache_.end()) return &it->second;
 
@@ -121,6 +133,55 @@ float MemorySegmentReader::fieldAvgDocLen(const std::string& field) const
     uint32_t n = seg_.docCount();
     if (n == 0) return 1.0f;
     return static_cast<float>(seg_.fieldTotalTokens(field)) / static_cast<float>(n);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// readStoredDoc：从 StoredPage 链还原存储字段
+//
+// 内存格式（writeStoredFields 写入）：
+//   [n_fields:4B] [name_len:4B name:N val_len:4B val:M] ...
+// ─────────────────────────────────────────────────────────────────────────────
+
+ii::StoredDocResult MemorySegmentReader::readStoredDoc(ii::DocId doc_id) const
+{
+    ii::StoredDocResult result;
+    result.doc_id = doc_id;
+    result.ext_id = seg_.docExtId(doc_id);
+
+    uint32_t head = seg_.storedHead(doc_id);
+    if (head == INVALID_OFFSET) return result;
+
+    // 拼接 StoredPage 链
+    std::string payload;
+    uint32_t cur = head;
+    while (cur != INVALID_OFFSET) {
+        const StoredPageHeader* hdr = seg_.arena().at<StoredPageHeader>(cur);
+        const char* data = reinterpret_cast<const char*>(hdr) + sizeof(StoredPageHeader);
+        payload.append(data, hdr->data_len);
+        cur = hdr->next;
+    }
+    if (payload.size() < 4) return result;
+
+    const char* p   = payload.data();
+    const char* end = p + payload.size();
+
+    uint32_t n_fields = 0;
+    std::memcpy(&n_fields, p, 4); p += 4;
+
+    for (uint32_t i = 0; i < n_fields && p + 8 <= end; ++i) {
+        uint32_t name_len = 0;
+        std::memcpy(&name_len, p, 4); p += 4;
+        if (p + name_len > end) break;
+        std::string name(p, name_len); p += name_len;
+        if (p + 4 > end) break;
+        uint32_t val_len = 0;
+        std::memcpy(&val_len, p, 4); p += 4;
+        if (p + val_len > end) break;
+        std::string val(p, val_len); p += val_len;
+        result.str_fields[std::move(name)] = std::move(val);
+    }
+
+    return result;
 }
 
 } // namespace ii::memory
