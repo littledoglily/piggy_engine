@@ -1,4 +1,5 @@
 #include "index/segment_reader.h"
+#include "store/posting_iterator.h"
 #include "field/fast_field_reader.h"
 #include "field/schema.h"
 #include "codec/pfor_delta.h"
@@ -344,13 +345,13 @@ std::vector<DocId> SegmentReader::readPostingList(const std::string& term) const
     if (!field_term_dicts_.empty()) {
         for (const auto& [field, dict] : field_term_dicts_) {
             if (dict.count(term)) {
-                PostingIterator iter = postingIterator(field, term);
+                auto iter = postingIterator(field, term);
                 std::vector<DocId> result;
                 const TermMeta* m = getTermMeta(field, term);
                 if (m) result.reserve(m->doc_freq);
-                while (!iter.isEnd()) {
-                    result.push_back(iter.docId());
-                    iter.next();
+                while (!iter->isEnd()) {
+                    result.push_back(iter->docId());
+                    iter->next();
                 }
                 return result;
             }
@@ -592,9 +593,9 @@ float SegmentReader::bm25Score(
         if (idf == 0.f) continue;
 
         auto iter = postingIterator(field, term);
-        if (!iter.advance(doc_id) || iter.docId() != doc_id) continue;
+        if (!iter->advance(doc_id) || iter->docId() != doc_id) continue;
 
-        float tf_f    = static_cast<float>(iter.tf());
+        float tf_f    = static_cast<float>(iter->tf());
         float tf_norm = tf_f * (k1 + 1.0f) / (tf_f + k1 * len_factor);
         score += tf_norm * idf;
     }
@@ -624,9 +625,9 @@ float SegmentReader::bm25Score(
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         auto iter = postingIterator(term);
 #pragma clang diagnostic pop
-        if (!iter.advance(doc_id) || iter.docId() != doc_id) continue;
+        if (!iter->advance(doc_id) || iter->docId() != doc_id) continue;
 
-        float tf_f    = static_cast<float>(iter.tf());
+        float tf_f    = static_cast<float>(iter->tf());
         float tf_norm = tf_f * (k1 + 1.0f) / (tf_f + k1);
         score += tf_norm * idf;
     }
@@ -665,30 +666,32 @@ bool SegmentReader::hasFastField() const {
 // postingIterator（per-field）：每次调用打开独立文件句柄
 // ─────────────────────────────────────────────────────────────────────────────
 
-PostingIterator SegmentReader::postingIterator(const std::string& field,
-                                                const std::string& term) const {
+std::unique_ptr<IPostingIterator> SegmentReader::postingIterator(
+    const std::string& field, const std::string& term) const {
     const TermMeta* meta = getTermMeta(field, term);
-    if (!meta) return PostingIterator();
-    return PostingIterator(*meta, fieldPath(field, "doc"));
+    if (!meta) return IPostingIterator::makeEmpty();
+    return std::make_unique<PostingIterator>(*meta, fieldPath(field, "doc"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // postingIterator（legacy）：返回第一个命中字段的迭代器
 // ─────────────────────────────────────────────────────────────────────────────
 
-PostingIterator SegmentReader::postingIterator(const std::string& term) const {
+std::unique_ptr<IPostingIterator> SegmentReader::postingIterator(
+    const std::string& term) const {
     if (!indexed_field_names_.empty()) {
         for (const auto& field : indexed_field_names_) {
             auto fit = field_term_dicts_.find(field);
             if (fit == field_term_dicts_.end()) continue;
             if (fit->second.count(term))
-                return PostingIterator(fit->second.at(term), fieldPath(field, "doc"));
+                return std::make_unique<PostingIterator>(fit->second.at(term),
+                                                         fieldPath(field, "doc"));
         }
-        return PostingIterator();
+        return IPostingIterator::makeEmpty();
     }
     const TermMeta* meta = getTermMeta(term);
-    if (!meta) return PostingIterator();
-    return PostingIterator(*meta, path("doc"));
+    if (!meta) return IPostingIterator::makeEmpty();
+    return std::make_unique<PostingIterator>(*meta, path("doc"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

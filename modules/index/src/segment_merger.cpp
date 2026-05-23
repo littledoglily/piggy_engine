@@ -316,7 +316,7 @@ MergeStats SegmentMerger::doMerge(const std::vector<uint32_t>& src_ids,
                         });
                 } else {
                     // FreqsOnly：PostingIterator 已是惰性块读取
-                    auto iter_ptr = std::make_shared<PostingIterator>(reader->postingIterator(field, term));
+                    auto iter_ptr = std::shared_ptr<IPostingIterator>(reader->postingIterator(field, term));
                     if (iter_ptr->isEnd()) continue;
                     kmerge.addSource(
                         [iter_ptr, sid, &remap]() mutable

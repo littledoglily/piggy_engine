@@ -4,7 +4,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "query/scorer.h"
 #include "query/scorer_context.h"
-#include "store/posting_iterator.h"
+#include "store/i_posting_iterator.h"
+#include <memory>
 #include <string>
 
 namespace ii {
@@ -25,7 +26,7 @@ public:
     bool  isEnd()         const override;
 
 private:
-    PostingIterator      iter_;
+    std::unique_ptr<IPostingIterator> iter_;
     std::string          field_;
     std::string          term_;
     float                idf_     = 0.0f;

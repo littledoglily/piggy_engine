@@ -74,7 +74,7 @@ static void test_docid_sequence() {
     // 实际用 per-field API
     auto iter = seg.postingIterator(field, term);
     std::vector<DocId> from_iter;
-    while (!iter.isEnd()) { from_iter.push_back(iter.docId()); iter.next(); }
+    while (!iter->isEnd()) { from_iter.push_back(iter->docId()); iter->next(); }
 
     // 构造 ScorerContext（term_idfs 填充 field:term → IDF）
     const TermMeta* meta = seg.getTermMeta(field, term);
@@ -188,10 +188,10 @@ static void test_advance() {
     bool found = ts.advance(target);
 
     auto ref_iter = seg.postingIterator(field, term);
-    bool ref_found = ref_iter.advance(target);
+    bool ref_found = ref_iter->advance(target);
 
     if (found != ref_found) FAIL("advance 返回值不一致");
-    if (found && ts.docId() != ref_iter.docId()) FAIL("advance 后 docId 不一致");
+    if (found && ts.docId() != ref_iter->docId()) FAIL("advance 后 docId 不一致");
     PASS();
 
     fs::remove_all(dir);

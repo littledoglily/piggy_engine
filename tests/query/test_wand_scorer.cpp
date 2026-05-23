@@ -67,7 +67,7 @@ static std::vector<DocId> readAll(const SegmentReader& seg,
                                    const std::string& term) {
     auto it = seg.postingIterator(field, term);
     std::vector<DocId> r;
-    while (!it.isEnd()) { r.push_back(it.docId()); it.next(); }
+    while (!it->isEnd()) { r.push_back(it->docId()); it->next(); }
     return r;
 }
 

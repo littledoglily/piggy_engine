@@ -93,8 +93,8 @@ public:
 
     // ISegmentReader interface
 
-    PostingIterator postingIterator(const std::string& field,
-                                    const std::string& term) const override {
+    std::unique_ptr<IPostingIterator> postingIterator(
+        const std::string& field, const std::string& term) const override {
         ensureBuilt();
         return reader_->postingIterator(field, term);
     }

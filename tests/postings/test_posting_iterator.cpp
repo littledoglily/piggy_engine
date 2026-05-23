@@ -4,7 +4,7 @@
 // 每个测试在 /tmp/test_pi_<suffix> 下独立建段，测试结束清理。
 // 正确性基准：readPostingList() 的结果（全量解压后的升序 doc_id 列表）。
 
-#include "store/posting_iterator.h"
+#include "store/i_posting_iterator.h"
 #include "index/segment_reader.h"
 #include "index/index_writer.h"
 #include "analysis/analyzer.h"
@@ -43,7 +43,7 @@ static std::string findTermWithDf(const SegmentReader& seg, uint32_t df) {
 }
 
 // 遍历 PostingIterator，收集全部 doc_id
-static std::vector<DocId> drainIterator(PostingIterator& iter) {
+static std::vector<DocId> drainIterator(ii::IPostingIterator& iter) {
     std::vector<DocId> result;
     while (!iter.isEnd()) {
         result.push_back(iter.docId());
@@ -80,10 +80,10 @@ void test_pi_sequential_next() {
     if (expected.size() != 10) FAIL("unexpected df");
 
     auto iter = seg.postingIterator(term);
-    auto got  = drainIterator(iter);
+    auto got  = drainIterator(*iter);
 
     if (got != expected) FAIL("next() sequence differs from readPostingList()");
-    if (!iter.isEnd()) FAIL("iterator should be exhausted");
+    if (!iter->isEnd()) FAIL("iterator should be exhausted");
 
     fs::remove_all(dir);
     PASS();
@@ -116,24 +116,24 @@ void test_pi_advance_exact() {
     // advance() 到第一个 doc
     {
         auto iter = seg.postingIterator(term);
-        if (!iter.advance(1) || iter.docId() != 1) FAIL("advance(1) failed");
+        if (!iter->advance(1) || iter->docId() != 1) FAIL("advance(1) failed");
     }
     // advance() 到中间 doc
     {
         auto iter = seg.postingIterator(term);
-        if (!iter.advance(5) || iter.docId() != 5) FAIL("advance(5) failed");
-        if (!iter.advance(8) || iter.docId() != 8) FAIL("advance(8) from 5 failed");
+        if (!iter->advance(5) || iter->docId() != 5) FAIL("advance(5) failed");
+        if (!iter->advance(8) || iter->docId() != 8) FAIL("advance(8) from 5 failed");
     }
     // advance() 到最后一个 doc
     {
         auto iter = seg.postingIterator(term);
-        if (!iter.advance(10) || iter.docId() != 10) FAIL("advance(10) failed");
+        if (!iter->advance(10) || iter->docId() != 10) FAIL("advance(10) failed");
     }
     // advance() 已在目标位置（curDoc >= target 直接返回 true，不移动）
     {
         auto iter = seg.postingIterator(term);
-        iter.advance(5);
-        if (!iter.advance(3) || iter.docId() != 5) FAIL("advance backward should not move");
+        iter->advance(5);
+        if (!iter->advance(3) || iter->docId() != 5) FAIL("advance backward should not move");
     }
 
     fs::remove_all(dir);
@@ -170,27 +170,27 @@ void test_pi_advance_skip() {
     // advance(2) → 跳到 doc 3（第一个 >= 2）
     {
         auto iter = seg.postingIterator(term);
-        if (!iter.advance(2) || iter.docId() != 3) FAIL("advance(2) should return doc 3");
+        if (!iter->advance(2) || iter->docId() != 3) FAIL("advance(2) should return doc 3");
     }
     // advance(6) → doc 7
     {
         auto iter = seg.postingIterator(term);
-        if (!iter.advance(6) || iter.docId() != 7) FAIL("advance(6) should return doc 7");
+        if (!iter->advance(6) || iter->docId() != 7) FAIL("advance(6) should return doc 7");
     }
     // advance(18) → doc 19
     {
         auto iter = seg.postingIterator(term);
-        if (!iter.advance(18) || iter.docId() != 19) FAIL("advance(18) should return doc 19");
+        if (!iter->advance(18) || iter->docId() != 19) FAIL("advance(18) should return doc 19");
     }
     // advance 结果与 lower_bound 完全一致（系统性验证）
     {
         for (DocId target = 1; target <= 21; ++target) {
             auto iter = seg.postingIterator(term);
-            bool ok   = iter.advance(target);
+            bool ok   = iter->advance(target);
             auto lb   = std::lower_bound(pl.begin(), pl.end(), target);
             bool lb_ok = (lb != pl.end());
             if (ok != lb_ok) FAIL("advance/lb mismatch at target=" + std::to_string(target));
-            if (ok && iter.docId() != *lb)
+            if (ok && iter->docId() != *lb)
                 FAIL("advance result wrong at target=" + std::to_string(target));
         }
     }
@@ -224,9 +224,9 @@ void test_pi_advance_past_end() {
     if (term.empty()) FAIL("term not found");
 
     auto iter = seg.postingIterator(term);
-    bool ret = iter.advance(100);  // 超出范围
+    bool ret = iter->advance(100);  // 超出范围
     if (ret) FAIL("advance past end should return false");
-    if (!iter.isEnd()) FAIL("iterator should be at end");
+    if (!iter->isEnd()) FAIL("iterator should be at end");
 
     fs::remove_all(dir);
     PASS();
@@ -264,26 +264,26 @@ void test_pi_multi_block_advance() {
     constexpr DocId targets[] = {1, 64, 128, 129, 200, 256, 257, 300};
     for (DocId t : targets) {
         auto iter = seg.postingIterator(term);
-        bool ok   = iter.advance(t);
+        bool ok   = iter->advance(t);
         auto lb   = std::lower_bound(pl.begin(), pl.end(), t);
-        if (!ok || iter.docId() != *lb)
+        if (!ok || iter->docId() != *lb)
             FAIL("multi-block advance failed at target=" + std::to_string(t));
     }
 
     // 跨块连续 advance（从 block0 → block1 → block2）
     {
         auto iter = seg.postingIterator(term);
-        iter.advance(128);
-        if (iter.docId() != 128) FAIL("advance(128) should be in block0");
-        iter.advance(129);
-        if (iter.docId() != 129) FAIL("advance(129) should cross to block1");
-        iter.advance(256);
-        if (iter.docId() != 256) FAIL("advance(256) last of block1");
-        iter.advance(257);
-        if (iter.docId() != 257) FAIL("advance(257) should cross to block2");
-        iter.advance(300);
-        if (iter.docId() != 300) FAIL("advance(300) last doc");
-        if (iter.advance(301)) FAIL("advance(301) should be past end");
+        iter->advance(128);
+        if (iter->docId() != 128) FAIL("advance(128) should be in block0");
+        iter->advance(129);
+        if (iter->docId() != 129) FAIL("advance(129) should cross to block1");
+        iter->advance(256);
+        if (iter->docId() != 256) FAIL("advance(256) last of block1");
+        iter->advance(257);
+        if (iter->docId() != 257) FAIL("advance(257) should cross to block2");
+        iter->advance(300);
+        if (iter->docId() != 300) FAIL("advance(300) last doc");
+        if (iter->advance(301)) FAIL("advance(301) should be past end");
     }
 
     fs::remove_all(dir);
@@ -317,18 +317,18 @@ void test_pi_block_max_docid() {
     {
         auto iter = seg.postingIterator(term);
         // 初始在 block0（docs 1..128）
-        if (iter.blockMaxDocId() != 128)
-            FAIL("block0 maxDocId should be 128, got " + std::to_string(iter.blockMaxDocId()));
+        if (iter->blockMaxDocId() != 128)
+            FAIL("block0 maxDocId should be 128, got " + std::to_string(iter->blockMaxDocId()));
 
         // 推进到 block1
-        iter.advance(129);
-        if (iter.blockMaxDocId() != 256)
-            FAIL("block1 maxDocId should be 256, got " + std::to_string(iter.blockMaxDocId()));
+        iter->advance(129);
+        if (iter->blockMaxDocId() != 256)
+            FAIL("block1 maxDocId should be 256, got " + std::to_string(iter->blockMaxDocId()));
 
         // 推进到 block2（最后一块，44 docs：257..300）
-        iter.advance(257);
-        if (iter.blockMaxDocId() != 300)
-            FAIL("block2 maxDocId should be 300, got " + std::to_string(iter.blockMaxDocId()));
+        iter->advance(257);
+        if (iter->blockMaxDocId() != 300)
+            FAIL("block2 maxDocId should be 300, got " + std::to_string(iter->blockMaxDocId()));
     }
 
     fs::remove_all(dir);
@@ -362,24 +362,24 @@ void test_pi_next_and_advance_interleave() {
     auto iter = seg.postingIterator(term);
 
     // next() 推进 5 步 → doc 5
-    for (int i = 0; i < 4; ++i) iter.next();
-    if (iter.docId() != 5) FAIL("after 4 next() from doc1, expected doc5");
+    for (int i = 0; i < 4; ++i) iter->next();
+    if (iter->docId() != 5) FAIL("after 4 next() from doc1, expected doc5");
 
     // advance() 跨块跳跃 → doc 200
-    if (!iter.advance(200) || iter.docId() != 200) FAIL("advance(200) failed");
+    if (!iter->advance(200) || iter->docId() != 200) FAIL("advance(200) failed");
 
     // next() 继续 → doc 201
-    if (!iter.next() || iter.docId() != 201) FAIL("next() after advance(200) should be 201");
+    if (!iter->next() || iter->docId() != 201) FAIL("next() after advance(200) should be 201");
 
     // 再次 advance() 跨块 → doc 257
-    if (!iter.advance(257) || iter.docId() != 257) FAIL("advance(257) failed");
+    if (!iter->advance(257) || iter->docId() != 257) FAIL("advance(257) failed");
 
     // next() 到 block2 内 → doc 258
-    if (!iter.next() || iter.docId() != 258) FAIL("next() after advance(257) should be 258");
+    if (!iter->next() || iter->docId() != 258) FAIL("next() after advance(257) should be 258");
 
     // advance 到末尾
-    if (!iter.advance(300) || iter.docId() != 300) FAIL("advance(300) failed");
-    if (iter.advance(301)) FAIL("advance past end should fail");
+    if (!iter->advance(300) || iter->docId() != 300) FAIL("advance(300) failed");
+    if (iter->advance(301)) FAIL("advance past end should fail");
 
     fs::remove_all(dir);
     PASS();
@@ -417,15 +417,15 @@ void test_pi_advance_consistency() {
     // 对每个 target（1..302）验证 advance() == lower_bound(pl)
     for (DocId target = 1; target <= 302; ++target) {
         auto iter = seg.postingIterator(term);
-        bool got_ok  = iter.advance(target);
+        bool got_ok  = iter->advance(target);
         auto lb      = std::lower_bound(pl.begin(), pl.end(), target);
         bool want_ok = (lb != pl.end());
 
         if (got_ok != want_ok)
             FAIL("advance/lb ok-flag mismatch at target=" + std::to_string(target));
-        if (got_ok && iter.docId() != *lb)
+        if (got_ok && iter->docId() != *lb)
             FAIL("advance result wrong at target=" + std::to_string(target)
-                 + " got=" + std::to_string(iter.docId())
+                 + " got=" + std::to_string(iter->docId())
                  + " want=" + std::to_string(*lb));
     }
 

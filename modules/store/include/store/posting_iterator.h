@@ -1,7 +1,12 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// store/posting_iterator.h  —  Posting List 惰性迭代器
+// store/posting_iterator.h  —  磁盘版 Posting List 惰性迭代器
+//
+// 实现 IPostingIterator；内部通过 PForDelta 块解压 + SkipList 跳跃。
+// 创建：SegmentReader::postingIterator() 返回 unique_ptr<IPostingIterator>。
+// 空迭代器：使用 IPostingIterator::makeEmpty()，不要直接默认构造本类。
 // ─────────────────────────────────────────────────────────────────────────────
+#include "store/i_posting_iterator.h"
 #include "core/types.h"
 #include "codec/skiplist.h"
 #include <fstream>
@@ -10,24 +15,25 @@
 
 namespace ii {
 
-class PostingIterator {
+class PostingIterator : public IPostingIterator {
 public:
     PostingIterator(const TermMeta& meta, const std::string& doc_path);
-    PostingIterator() = default;
 
     PostingIterator(const PostingIterator&)            = delete;
     PostingIterator& operator=(const PostingIterator&) = delete;
     PostingIterator(PostingIterator&&)                 = default;
     PostingIterator& operator=(PostingIterator&&)      = default;
 
-    DocId    docId()         const { return cur_doc_; }
-    float    blockMaxScore() const { return block_max_score_; }
-    DocId    blockMaxDocId() const { return cur_block_.empty() ? INVALID_DOC : cur_block_.back(); }
-    bool     isEnd()         const { return cur_doc_ == INVALID_DOC; }
-    uint32_t tf()            const { return cur_tf_; }
+    DocId    docId()         const override { return cur_doc_; }
+    float    blockMaxScore() const override { return block_max_score_; }
+    DocId    blockMaxDocId() const override {
+        return cur_block_.empty() ? INVALID_DOC : cur_block_.back();
+    }
+    bool     isEnd()         const override { return cur_doc_ == INVALID_DOC; }
+    uint32_t tf()            const override { return cur_tf_; }
 
-    bool next();
-    bool advance(DocId target);
+    bool next()                override;
+    bool advance(DocId target) override;
 
 private:
     bool loadNextBlock();

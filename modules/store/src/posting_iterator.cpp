@@ -4,10 +4,34 @@
 #include <cstring>
 #include <stdexcept>
 
+namespace {
+
+// Always-exhausted iterator — returned by IPostingIterator::makeEmpty().
+class EmptyPostingIterator : public ii::IPostingIterator {
+public:
+    ii::DocId docId()         const override { return ii::INVALID_DOC; }
+    uint32_t  tf()            const override { return 1; }
+    float     blockMaxScore() const override { return 0.0f; }
+    ii::DocId blockMaxDocId() const override { return ii::INVALID_DOC; }
+    bool      isEnd()         const override { return true; }
+    bool      next()                override { return false; }
+    bool      advance(ii::DocId)    override { return false; }
+};
+
+} // anonymous namespace
+
 namespace ii {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 构造：打开文件 → 读 SkipList → seek 到 posting 起点 → 推进到第一个 doc
+// IPostingIterator::makeEmpty
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::unique_ptr<IPostingIterator> IPostingIterator::makeEmpty() {
+    return std::make_unique<EmptyPostingIterator>();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PostingIterator 构造：打开文件 → 读 SkipList → seek 到 posting 起点 → 推进到第一个 doc
 // ─────────────────────────────────────────────────────────────────────────────
 
 PostingIterator::PostingIterator(const TermMeta& meta, const std::string& doc_path)
@@ -27,7 +51,7 @@ PostingIterator::PostingIterator(const TermMeta& meta, const std::string& doc_pa
     file_.read(reinterpret_cast<char*>(buf.data()), skip_bytes);
     skip_list_ = SkipList::deserialize(buf.data(), buf.size());
 
-    // ── 预加载 tf 字节数组（若 .doc 文件存储了 tf）────────────────────────────
+    // ── 预加载 tf 字节数组 ────────────────────────────────────────────────────
     if (meta_.tf_data_offset > 0 && meta_.doc_freq > 0) {
         all_tfs_.resize(meta_.doc_freq);
         file_.seekg(static_cast<std::streamoff>(meta_.tf_data_offset));
@@ -44,7 +68,6 @@ PostingIterator::PostingIterator(const TermMeta& meta, const std::string& doc_pa
 
 // ─────────────────────────────────────────────────────────────────────────────
 // scanBlock：在 cur_block_[cur_pos_..] 内二分查找第一个 >= target 的 doc
-// cur_block_ 存储升序 doc_id（delta 解压 + 前缀和还原），满足二分前提
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool PostingIterator::scanBlock(DocId target) {
@@ -90,7 +113,6 @@ bool PostingIterator::loadNextBlock() {
                        ? skip_list_.node(cur_block_idx_).max_score
                        : 0.0f;
 
-    // 填充当前 Block 的 tf 切片：block i 对应 all_tfs_[i*BLOCK_SIZE .. i*BLOCK_SIZE+size)
     if (!all_tfs_.empty()) {
         size_t block_start = cur_block_idx_ * (size_t)PForDelta::BLOCK_SIZE;
         size_t block_size  = cur_block_.size();
@@ -111,7 +133,7 @@ bool PostingIterator::loadNextBlock() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// next：推进到下一个 doc
+// next
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool PostingIterator::next() {
@@ -129,26 +151,22 @@ bool PostingIterator::next() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// advance：跳跃到第一个 >= target 的 doc
+// advance
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool PostingIterator::advance(DocId target) {
     if (cur_doc_ == INVALID_DOC) return false;
     if (cur_doc_ >= target)      return true;
 
-    // 先在当前 Block 内二分查找
     if (scanBlock(target)) return true;
-
-    // 当前 Block 内找不到，用 SkipList 跳跃到正确的 Block
     return seekToBlock(target);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// seekToBlock：SkipList 跳跃 + 块内二分扫描
+// seekToBlock
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool PostingIterator::seekToBlock(DocId target) {
-    // 没有 SkipList（整个 posting 只有 1 个 Block），顺序加载剩余 Block
     if (skip_list_.empty()) {
         while (loadNextBlock()) {
             if (scanBlock(target)) return true;
@@ -160,7 +178,6 @@ bool PostingIterator::seekToBlock(DocId target) {
     auto result = skip_list_.find(target);
 
     if (result.byte_offset == UINT64_MAX) {
-        // target 超出 SkipList 覆盖范围，顺序加载剩余 Block
         while (loadNextBlock()) {
             if (scanBlock(target)) return true;
         }
@@ -168,7 +185,6 @@ bool PostingIterator::seekToBlock(DocId target) {
         return false;
     }
 
-    // 目标 Block 比当前加载位置更靠前（不应发生，防御性处理）
     if (result.block_index < cur_block_idx_) {
         while (loadNextBlock()) {
             if (scanBlock(target)) return true;
@@ -177,7 +193,6 @@ bool PostingIterator::seekToBlock(DocId target) {
         return false;
     }
 
-    // ── 向目标 Block 跳跃 ─────────────────────────────────────────────────────
     uint32_t docs_before = 0;
     for (size_t i = 0; i < result.block_index; ++i)
         docs_before += (i < skip_list_.size()) ? skip_list_.node(i).doc_count : 128u;
@@ -190,10 +205,8 @@ bool PostingIterator::seekToBlock(DocId target) {
     file_.clear();
     file_.seekg(static_cast<std::streamoff>(meta_.posting_offset + result.byte_offset));
 
-    // 加载目标 Block 并二分查找（SkipList 精度保证 target 在本 Block 内）
     while (loadNextBlock()) {
         if (scanBlock(target)) return true;
-        // target 不在本 Block（SkipList 精度内不应发生），继续下一 Block
     }
 
     cur_doc_ = INVALID_DOC;

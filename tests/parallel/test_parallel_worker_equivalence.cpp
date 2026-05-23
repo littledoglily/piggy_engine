@@ -229,8 +229,8 @@ void test_posting_iterator_matches_single() {
         auto par_it = par_reader.postingIterator("body", term);
 
         uint32_t st_cnt = 0,  par_cnt = 0;
-        while (st_it.next())  ++st_cnt;
-        while (par_it.next()) ++par_cnt;
+        while (st_it->next())  ++st_cnt;
+        while (par_it->next()) ++par_cnt;
 
         if (st_cnt != par_cnt)
             FAIL("term=\"" + term + "\" st_cnt=" + std::to_string(st_cnt)

@@ -297,8 +297,8 @@ static void test_or_result_subset_of_union() {
 
     // 所有结果必须在 alpha 或 beta 的倒排链中
     std::set<DocId> alpha_docs, beta_docs;
-    { auto it = seg.postingIterator("body","alpha"); while(!it.isEnd()){alpha_docs.insert(it.docId());it.next();} }
-    { auto it = seg.postingIterator("body","beta");  while(!it.isEnd()){beta_docs.insert(it.docId()); it.next();} }
+    { auto it = seg.postingIterator("body","alpha"); while(!it->isEnd()){alpha_docs.insert(it->docId());it->next();} }
+    { auto it = seg.postingIterator("body","beta");  while(!it->isEnd()){beta_docs.insert(it->docId()); it->next();} }
 
     for (const auto& r : results) {
         if (!alpha_docs.count(r.doc_id) && !beta_docs.count(r.doc_id))

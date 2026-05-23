@@ -63,6 +63,31 @@ public:
     const TermHashTable& hashtable() const { return hashtable_; }
     const SegmentArena&  arena()     const { return arena_; }
 
+    // Per-doc per-field token count, for ISegmentReader::fieldDocLen (BM25).
+    uint32_t docFieldLen(const std::string& field, ii::DocId doc_id) const {
+        auto it = doc_field_len_.find(doc_id);
+        if (it == doc_field_len_.end()) return 0;
+        auto jt = it->second.find(field);
+        return (jt != it->second.end()) ? jt->second : 0;
+    }
+
+    // Per-field total tokens, for ISegmentReader::fieldAvgDocLen (BM25).
+    uint64_t fieldTotalTokens(const std::string& field) const {
+        auto it = field_total_tokens_.find(field);
+        return (it != field_total_tokens_.end()) ? it->second : 0;
+    }
+
+    // Doc_id → head of StoredPage chain (INVALID_OFFSET if not stored).
+    uint32_t storedHead(ii::DocId doc_id) const {
+        auto it = stored_heads_.find(doc_id);
+        return (it != stored_heads_.end()) ? it->second : INVALID_OFFSET;
+    }
+
+    // Indexed field names, for ISegmentReader::indexedFieldNames().
+    const std::vector<std::unique_ptr<ii::FieldDescriptor>>& fieldDescs() const {
+        return descs_;
+    }
+
     // reset 供 flush 后复用（清空所有状态）
     void reset();
 
@@ -88,7 +113,14 @@ private:
 
     // ── 统计 ─────────────────────────────────────────────────────────────────
     uint32_t doc_count_       = 0;
-    uint64_t total_tokens_    = 0;   // 所有字段所有文档的 token 总数（用于 avgdl）
+    uint64_t total_tokens_    = 0;
+
+    // per-doc per-field token count (BM25 fieldDocLen)
+    std::unordered_map<ii::DocId, std::unordered_map<std::string, uint32_t>> doc_field_len_;
+    // per-field total tokens (BM25 fieldAvgDocLen)
+    std::unordered_map<std::string, uint64_t> field_total_tokens_;
+    // doc_id → StoredPage chain head (for stored-field retrieval)
+    std::unordered_map<ii::DocId, uint32_t>   stored_heads_;
 
     // arena 中至少要为一篇文档预留的空间（估算：最大文档 ~100 term，每 term 2 pages）
     static constexpr size_t MIN_RESERVE_BYTES = 64 * 1024;

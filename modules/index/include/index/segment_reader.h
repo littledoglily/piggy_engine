@@ -5,7 +5,7 @@
 #include "core/types.h"
 #include "index/i_segment_reader.h"
 #include "codec/skiplist.h"
-#include "store/posting_iterator.h"
+#include "store/i_posting_iterator.h"
 #include "store/pos_iterator.h"
 #include "field/fast_field_reader.h"
 #include <string>
@@ -27,8 +27,8 @@ public:
 
     // ── ISegmentReader 接口（override）────────────────────────────────────────
 
-    PostingIterator postingIterator(const std::string& field,
-                                    const std::string& term) const override;
+    std::unique_ptr<IPostingIterator> postingIterator(const std::string& field,
+                                                      const std::string& term) const override;
 
     const TermMeta* getTermMeta(const std::string& field,
                                 const std::string& term) const override;
@@ -133,7 +133,7 @@ public:
     }
 
     [[deprecated("use postingIterator(field, term)")]]
-    PostingIterator postingIterator(const std::string& term) const;
+    std::unique_ptr<IPostingIterator> postingIterator(const std::string& term) const;
 
 private:
     void loadTim();

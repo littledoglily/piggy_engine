@@ -3,7 +3,8 @@
 // index/i_segment_reader.h  —  Segment 只读接口（query/ 依赖此接口，不依赖实现）
 // ─────────────────────────────────────────────────────────────────────────────
 #include "core/types.h"
-#include "store/posting_iterator.h"
+#include "store/i_posting_iterator.h"
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -13,8 +14,9 @@ class ISegmentReader {
 public:
     virtual ~ISegmentReader() = default;
 
-    virtual PostingIterator postingIterator(const std::string& field,
-                                            const std::string& term) const = 0;
+    virtual std::unique_ptr<IPostingIterator> postingIterator(
+        const std::string& field,
+        const std::string& term) const = 0;
 
     virtual const TermMeta* getTermMeta(const std::string& field,
                                         const std::string& term) const = 0;

@@ -329,27 +329,27 @@ std::vector<SearchResult> IndexSearcher::searchAND(
     });
 
     // ── 创建惰性迭代器（每个独立文件句柄）──────────────────────────────────
-    std::vector<PostingIterator> iters;
+    std::vector<std::unique_ptr<IPostingIterator>> iters;
     iters.reserve(expanded.size());
     for (size_t idx : order) {
         const auto& ft = expanded[idx];
-        PostingIterator it = ft.field.empty()
+        auto it = ft.field.empty()
             ? seg.postingIterator(ft.term)             // legacy
             : seg.postingIterator(ft.field, ft.term);  // per-field
-        if (it.isEnd()) return {};
+        if (it->isEnd()) return {};
         iters.push_back(std::move(it));
     }
 
     // ── Zigzag AND：driver = iters[0]（df 最小），其余追赶 ─────────────────
     std::vector<DocId> intersection;
     bool done = false;
-    while (!done && !iters[0].isEnd()) {
-        DocId target  = iters[0].docId();
+    while (!done && !iters[0]->isEnd()) {
+        DocId target  = iters[0]->docId();
         bool  matched = true;
         for (size_t i = 1; i < iters.size(); ++i) {
-            if (!iters[i].advance(target)) { done = true; break; }
-            if (iters[i].docId() != target) {
-                if (!iters[0].advance(iters[i].docId())) { done = true; break; }
+            if (!iters[i]->advance(target)) { done = true; break; }
+            if (iters[i]->docId() != target) {
+                if (!iters[0]->advance(iters[i]->docId())) { done = true; break; }
                 matched = false;
                 break;
             }
@@ -358,7 +358,7 @@ std::vector<SearchResult> IndexSearcher::searchAND(
             DocId did = target;
             if (seg.isAlive(did) && (!filter || passesFilter(seg, did, *filter)))
                 intersection.push_back(did);
-            iters[0].advance(did + 1);
+            iters[0]->advance(did + 1);
         }
     }
 
@@ -405,12 +405,12 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
     struct TermCursor {
         std::string     field;      // "" = legacy
         std::string     term;
-        PostingIterator iter;
+        std::unique_ptr<IPostingIterator> iter;
         float           idf;
         float           list_ub;   // 静态：全局 max_tf_norm × IDF（WAND pivot 判断）
         float           block_ub;  // 动态：当前 Block 的 UB（BlockMaxWAND 细筛）
-        DocId curDoc() const { return iter.docId(); }
-        void refreshBlockUb() { block_ub = iter.blockMaxScore() * idf; }
+        DocId curDoc() const { return iter->docId(); }
+        void refreshBlockUb() { block_ub = iter->blockMaxScore() * idf; }
     };
 
     if (debug_) printTermDebug(seg, fterms, term_idfs);
@@ -435,8 +435,8 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
         c.iter     = field.empty()
             ? seg.postingIterator(term)          // legacy
             : seg.postingIterator(field, term);  // per-field
-        c.block_ub = c.iter.blockMaxScore() * idf;
-        if (!c.iter.isEnd()) cursors.push_back(std::move(c));
+        c.block_ub = c.iter->blockMaxScore() * idf;
+        if (!c.iter->isEnd()) cursors.push_back(std::move(c));
     };
 
     for (const auto& ft : fterms) {
@@ -502,8 +502,8 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
             if (block_ub_sum < theta) {
                 // Block 级跳跃：所有 cursor 跳过当前 Block
                 for (auto& c : cursors) {
-                    DocId blk_end = c.iter.blockMaxDocId();
-                    if (blk_end != INVALID_DOC) c.iter.advance(blk_end + 1);
+                    DocId blk_end = c.iter->blockMaxDocId();
+                    if (blk_end != INVALID_DOC) c.iter->advance(blk_end + 1);
                     c.refreshBlockUb();
                 }
             } else {
@@ -534,7 +534,7 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
                 // 推进处于 pivot_doc 的 cursor
                 for (auto& c : cursors) {
                     if (c.curDoc() == pivot_doc) {
-                        c.iter.advance(pivot_doc + 1);
+                        c.iter->advance(pivot_doc + 1);
                         c.refreshBlockUb();
                     }
                 }
@@ -544,7 +544,7 @@ std::vector<SearchResult> IndexSearcher::searchOR_WAND(
             // 落后于 pivot_doc 的 cursor 跳跃到 pivot_doc
             for (auto& c : cursors) {
                 if (c.curDoc() < pivot_doc) {
-                    c.iter.advance(pivot_doc);
+                    c.iter->advance(pivot_doc);
                     c.refreshBlockUb();
                 }
             }

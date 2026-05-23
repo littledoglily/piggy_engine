@@ -17,32 +17,28 @@ MemorySegment::MemorySegment(const ii::Schema& schema,
 
 // ─────────────────────────────────────────────────────────────────────────────
 // addDocument
+// 顺序：先 writeStoredFields（预检 arena），再建倒排。
+// 若 arena 不足，stored fields 写入前抛出，posting 尚未写入，状态干净。
 // ─────────────────────────────────────────────────────────────────────────────
 
 void MemorySegment::addDocument(const ii::Document& doc, ii::DocId doc_id) {
-    // 1. 分词并建立倒排 posting
+    // 1. 先写 stored fields
+    writeStoredFields(doc_id, doc);
+
+    // 2. 分词并建立倒排 posting（position offset 跨字段连续）
     uint32_t field_pos_base = 0;
     std::vector<ii::Token> token_buf;
 
     for (const auto& desc : descs_) {
-        if (desc->indexOption() == ii::IndexOption::None) {
-            // 无索引字段跳过分词
-            token_buf.clear();  // 避免带入上一字段的 token
-            field_pos_base = desc->buildTokensDoc(
-                doc_id, doc.fields, field_pos_base, analyzer_, token_buf);
-            continue;
-        }
-
         token_buf.clear();
         field_pos_base = desc->buildTokensDoc(
             doc_id, doc.fields, field_pos_base, analyzer_, token_buf);
 
+        if (desc->indexOption() == ii::IndexOption::None) continue;
+
         if (!token_buf.empty())
             indexField(doc_id, desc->name(), token_buf);
     }
-
-    // 2. 存储字段（stored=true 的字段写入 StoredPage）
-    writeStoredFields(doc_id, doc);
 
     ++doc_count_;
 }
@@ -55,8 +51,7 @@ void MemorySegment::indexField(ii::DocId doc_id,
                                 const std::string& field_name,
                                 const std::vector<ii::Token>& tokens)
 {
-    // 临时 per-term 聚合（栈上 map，doc 结束后随函数退出）
-    // key = "field:term"，value = position 列表
+    // per-term 聚合：key = "field:term", value = position 列表
     std::unordered_map<std::string, std::vector<uint32_t>> term_positions;
 
     for (const auto& tok : tokens) {
@@ -65,32 +60,30 @@ void MemorySegment::indexField(ii::DocId doc_id,
         ++total_tokens_;
     }
 
-    // 分词完成后一次性提交所有 posting entry（避免半写状态进入 arena）
+    // 追踪 per-doc per-field token 数（BM25 fieldDocLen）
+    doc_field_len_[doc_id][field_name] += static_cast<uint32_t>(tokens.size());
+    field_total_tokens_[field_name]    += tokens.size();
+
+    // 一次性提交所有 posting entry（避免半写状态进入 arena）
     for (auto& [key, positions] : term_positions) {
         uint32_t tf = static_cast<uint32_t>(positions.size());
 
-        // 分配 TermPage
         uint32_t tp_off = allocTermPage(arena_);
         TermPage* tp    = arena_.at<TermPage>(tp_off);
 
         tp->doc_id = doc_id;
         tp->tf     = tf;
 
-        // 获取当前 term 的链表头（新节点将成为新头）
         const Bucket* existing = hashtable_.lookup(key);
         tp->next = existing ? existing->term_page_head : INVALID_OFFSET;
 
-        // 写入 position 信息
         if (tf <= static_cast<uint32_t>(INLINE_POS_LIMIT)) {
-            // inline：直接写入 TermPage 内的 union
             for (uint32_t i = 0; i < tf; ++i)
                 tp->inline_pos[i] = positions[i];
         } else {
-            // 溢出：分配 PosPage 链
             tp->pos_head = writePosChain(positions);
         }
 
-        // 更新 hashtable（upsert 会把 new_head 写入 bucket）
         hashtable_.upsert(key, tp_off, tf);
     }
 }
@@ -125,15 +118,16 @@ uint32_t MemorySegment::writePosChain(const std::vector<uint32_t>& positions) {
 // ─────────────────────────────────────────────────────────────────────────────
 // writeStoredFields：将存储字段序列化写入 StoredPage 链
 //
-// 简单二进制格式（无压缩，Step 5 可替换为 LZ4）：
+// 格式（无压缩）：
 //   [n_fields : 4B]
 //   For each stored field:
-//     [name_len : 4B] [name : N bytes]
-//     [val_len  : 4B] [val  : M bytes]
+//     [name_len : 4B] [name : N bytes] [val_len : 4B] [val : M bytes]
+//
+// 写入前预检 arena 空间，避免多页写到一半时 bad_alloc。
 // ─────────────────────────────────────────────────────────────────────────────
 
 void MemorySegment::writeStoredFields(ii::DocId doc_id, const ii::Document& doc) {
-    // 1. 序列化到临时 buffer（栈上 string）
+    // 1. 序列化到临时 buffer
     std::string buf;
     buf.reserve(256);
 
@@ -162,19 +156,24 @@ void MemorySegment::writeStoredFields(ii::DocId doc_id, const ii::Document& doc)
     buf.append(reinterpret_cast<const char*>(&n_fields), 4);
     buf.append(fields_buf);
 
-    // 2. 将 buf 写入 StoredPage 链
-    const char* src      = buf.data();
+    // 2. 预检 arena 空间（避免多页链写到一半 bad_alloc）
+    size_t pages_needed = (buf.size() + STORED_PAGE_DATA_SIZE - 1) / STORED_PAGE_DATA_SIZE;
+    if (arena_.full(pages_needed * STORED_PAGE_SIZE))
+        throw std::bad_alloc();
+
+    // 3. 将 buf 写入 StoredPage 链
+    const char* src       = buf.data();
     size_t      remaining = buf.size();
     uint32_t    head      = INVALID_OFFSET;
     uint32_t    prev_off  = INVALID_OFFSET;
 
     while (remaining > 0) {
-        uint32_t sp_off          = allocStoredPage(arena_);
-        StoredPageHeader* hdr    = arena_.at<StoredPageHeader>(sp_off);
-        hdr->doc_id              = doc_id;
-        hdr->next                = INVALID_OFFSET;
+        uint32_t sp_off       = allocStoredPage(arena_);
+        StoredPageHeader* hdr = arena_.at<StoredPageHeader>(sp_off);
+        hdr->doc_id           = doc_id;
+        hdr->next             = INVALID_OFFSET;
 
-        size_t chunk = std::min(remaining, STORED_PAGE_DATA_SIZE);
+        size_t chunk  = std::min(remaining, STORED_PAGE_DATA_SIZE);
         hdr->data_len = static_cast<uint32_t>(chunk);
 
         uint8_t* data = reinterpret_cast<uint8_t*>(hdr) + sizeof(StoredPageHeader);
@@ -189,8 +188,9 @@ void MemorySegment::writeStoredFields(ii::DocId doc_id, const ii::Document& doc)
         }
         prev_off = sp_off;
     }
-    // head 暂不存储（Step 4 MemorySegmentReader 需要时再加 doc_id → stored_head 索引）
-    (void)head;
+
+    // 记录 doc_id → stored head（MemorySegmentReader 读取 stored fields 需要）
+    stored_heads_[doc_id] = head;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -200,8 +200,11 @@ void MemorySegment::writeStoredFields(ii::DocId doc_id, const ii::Document& doc)
 void MemorySegment::reset() {
     arena_.reset();
     hashtable_.reset();
-    doc_count_    = 0;
-    total_tokens_ = 0;
+    doc_count_         = 0;
+    total_tokens_      = 0;
+    doc_field_len_.clear();
+    field_total_tokens_.clear();
+    stored_heads_.clear();
 }
 
 } // namespace ii::memory

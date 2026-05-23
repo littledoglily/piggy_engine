@@ -83,7 +83,7 @@ static std::set<DocId> bruteTopK(
     std::set<DocId> all;
     for (const auto& [f, t] : fterms) {
         auto it = seg.postingIterator(f, t);
-        while (!it.isEnd()) { all.insert(it.docId()); it.next(); }
+        while (!it->isEnd()) { all.insert(it->docId()); it->next(); }
     }
     std::vector<std::pair<float,DocId>> scored;
     for (DocId d : all) {
