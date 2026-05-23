@@ -15,6 +15,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 
 add_subdirectory(modules/core)
 add_subdirectory(modules/common)
+add_subdirectory(modules/memory)
 add_subdirectory(modules/codec)
 add_subdirectory(modules/analysis)
 add_subdirectory(modules/field)
@@ -135,6 +136,15 @@ target_link_libraries(test_parallel_e2e inverted_index_lib)
 add_executable(test_parallel_merge_fanout
     tests/parallel/test_parallel_merge_fanout.cpp)
 target_link_libraries(test_parallel_merge_fanout inverted_index_lib)
+
+# ── memory 模块单元测试 ──────────────────────────────────────────────────────
+add_executable(test_segment_arena
+    tests/memory/test_segment_arena.cpp)
+target_link_libraries(test_segment_arena piggy_memory)
+
+add_executable(test_term_hash_table
+    tests/memory/test_term_hash_table.cpp)
+target_link_libraries(test_term_hash_table piggy_memory)
 
 # ── common 模块单元测试 ──────────────────────────────────────────────────────
 add_executable(test_blocking_queue   tests/common/test_blocking_queue.cpp)
