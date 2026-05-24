@@ -236,6 +236,10 @@ static void test_block_max_score_valid() {
 
 // ── 测试 4：多 term，BlockMax 后召回与暴力基准一致 ───────────────────────────
 
+// 已修复 bug（勿回退）：原比较用 doc_id set，在多 term 场景下 top_k 边界存在同分文档（例如
+// 所有 beta+gamma 文档得分完全相同），暴力法按 doc_id 升序决胜而 WAND 无此约束，两者
+// 选出的 doc_id 集合不同但在语义上均正确。修复：改为比较排序后的分数向量，不对同分边界
+// 的具体 doc 做要求，只验证 Top-K 分数分布与暴力基准完全一致。
 static void test_multi_term_block_max_recall() {
     TEST("BlockMaxWAND 多 term Top-K 召回与暴力基准完全一致");
     auto dir = tmpDir("recall");
@@ -263,43 +267,69 @@ static void test_multi_term_block_max_recall() {
 
     int top_k = 15;
     WANDScorer ws(makeScorers(fterms, ctx), top_k, ctx, true);
-    auto got      = toIdSet(ws.collectTopK());
-    auto expected = bruteTopK(seg, ctx, fterms, top_k);
+    auto wand_hits = ws.collectTopK();
 
-    if (got != expected)
-        FAIL("BlockMax 后 Top-K 与暴力基准不一致");
+    // 暴力枚举所有命中文档，计算 Top-K 分数列表（降序）
+    std::set<DocId> all;
+    for (const auto& [f, t] : fterms) {
+        auto it = seg.postingIterator(f, t);
+        while (!it->isEnd()) { all.insert(it->docId()); it->next(); }
+    }
+    std::vector<float> brute_scores;
+    for (DocId d : all) {
+        float s = 0.f;
+        for (const auto& [f, t] : fterms) {
+            TermScorer ts(f, t, ctx);
+            if (!ts.isEnd() && ts.advance(d) && ts.docId() == d) s += ts.score();
+        }
+        brute_scores.push_back(s);
+    }
+    std::sort(brute_scores.rbegin(), brute_scores.rend());
+    if ((int)brute_scores.size() > top_k) brute_scores.resize(top_k);
+
+    std::vector<float> wand_scores;
+    for (const auto& r : wand_hits) wand_scores.push_back(r.score);
+    std::sort(wand_scores.rbegin(), wand_scores.rend());
+
+    bool ok = (wand_scores.size() == brute_scores.size());
+    for (size_t i = 0; ok && i < wand_scores.size(); ++i)
+        ok = std::abs(wand_scores[i] - brute_scores[i]) < 1e-5f;
+
+    if (!ok)
+        FAIL("BlockMax 后 Top-K 分数分布与暴力基准不一致");
     PASS();
     fs::remove_all(dir);
 }
 
 // ── 测试 5：Merge 后 UB 重算，BlockMax 仍正确 ────────────────────────────────
 
+// 已修复 bug（勿回退）：原代码用两个独立 IndexWriter 指向同一目录，两个都从
+// segment_id=0 开始，第二个 flush 覆盖第一个的 segment_0/，合并只能看到 60 篇文档。
+// 修复：使用单个 IndexWriter，显式调用两次 flush()，让同一 writer 的 next_seg_id_
+// 递增，分别产生 segment_0/ 和 segment_1/。
 static void test_merge_ub_recalc() {
     TEST("Merge 后 UB 重算：合并 Segment 后 BlockMaxWAND 结果仍正确");
     auto dir = tmpDir("merge");
     {
+        IndexWriter w(dir, 8);
         // Segment 0
-        IndexWriter w0(dir, 8);
         for (int i = 1; i <= 60; ++i) {
             Document doc; doc.doc_id = static_cast<DocId>(i);
             std::string body = "python";
             if (i % 5 == 0) body += " numpy";
             doc.set("body", body);
-            w0.addDocument(doc);
+            w.addDocument(doc);
         }
-        w0.flush();
-    }
-    {
+        w.flush();  // → segment_0/
         // Segment 1
-        IndexWriter w1(dir, 8);
         for (int i = 61; i <= 120; ++i) {
             Document doc; doc.doc_id = static_cast<DocId>(i - 60);
             std::string body = "python";
             if (i % 7 == 0) body += " numpy";
             doc.set("body", body);
-            w1.addDocument(doc);
+            w.addDocument(doc);
         }
-        w1.flush();
+        w.flush();  // → segment_1/
     }
 
     // 合并为单一 Segment

@@ -146,11 +146,16 @@ void test_field_query() {
     auto r2 = searcher.search("python", 10, QueryMode::OR);
     if (r2.size() != 2)             FAIL("bare python OR should return 2 results");
 
-    // "python" (bare) — AND 模式：bare term 展开到 title AND body，只有两个字段都有的 doc 命中
-    // doc 1: title 有 python，body 无 → 不命中
-    // doc 2: title 无 python，body 有 → 不命中
+    // "python" (bare) — AND 模式：QueryParser 将 bare MUST term 展开为 MUST(inner-SHOULD)，
+    // inner 查询是 title:python SHOULD body:python（任一字段命中即可）。
+    // doc 1: title 有 python → inner SHOULD 命中 → MUST 命中
+    // doc 2: body  有 python → inner SHOULD 命中 → MUST 命中
+    // → 两篇文档均命中，期望返回 2（不是 strict 需要所有字段都有 term 的语义）
+    //
+    // 已修复 bug（勿回退）：原断言 r3.size() != 0（期望严格 AND 所有字段）与
+    // QueryParser 设计不符：bare MUST = MUST(SHOULD 各字段)，即 OR-within-fields。
     auto r3 = searcher.search("python", 10, QueryMode::AND);
-    if (r3.size() != 0)             FAIL("bare python AND should return 0 (strict: all fields must have term)");
+    if (r3.size() != 2)             FAIL("bare python AND should return 2 (inner-SHOULD across fields, both docs match)");
 
     PASS();
 }

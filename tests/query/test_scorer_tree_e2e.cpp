@@ -5,6 +5,11 @@
 // 覆盖完整流水线：QueryParser → BooleanQuery → Scorer 树 → IndexSearcher
 // 并补充 Merge、软删除、多 Segment 等场景。
 //
+// 已修复 bug（勿回退）：
+//   测试 2 原代码 `std::set<DocId>(drainScorer(*scorer).begin(), drainScorer(*scorer).end())`
+//   对同一已耗尽的 scorer 调用两次 drainScorer()，begin() 与 end() 来自不同临时对象
+//   → 未定义行为（SIGBUS 崩溃）。已删除该无用行（got 从未被引用）。
+//
 //  1.  MUST + SHOULD + MUST_NOT 混合查询（通过 BooleanQuery 直接构造）
 //  2.  嵌套 BooleanQuery：外层 MUST + 内层 SHOULD 子查询
 //  3.  QueryParser → BooleanQuery → createScorer 结果与 IndexSearcher.search 一致
@@ -168,11 +173,9 @@ static void test_nested_boolean_query() {
 
     auto scorer = outer.createScorer(ctx);
     if (!scorer) FAIL("嵌套 createScorer 应非空");
-    auto got = std::set<DocId>(drainScorer(*scorer).begin(), drainScorer(*scorer).end());
 
-    // 重新跑一遍（drainScorer 消耗了 scorer，需要重建）
-    auto scorer2 = outer.createScorer(ctx);
-    auto got_ids = drainScorer(*scorer2);
+    // 注意：drainScorer 消耗 scorer；需用独立 scorer 实例各跑一次
+    auto got_ids = drainScorer(*scorer);
 
     // 期望：所有文档（body有内容 AND title:tutorial，即 3 的倍数）
     // body: 偶数=python, 奇数=java → 所有文档都命中内层 SHOULD
@@ -395,26 +398,29 @@ static void test_soft_delete_after_merge() {
 
 // ── 测试 8：多 Segment 搜索汇总 ──────────────────────────────────────────────
 
+// 已修复 bug（勿回退）：原代码用两个独立 IndexWriter 指向同一目录，两个都从
+// segment_id=0 开始，第二个 flush 覆盖第一个的 segment_0/，IndexSearcher
+// 只加载一个 segment（10 篇），搜索结果 10 而非期望的 17。
+// 修复：使用单个 IndexWriter，显式调用两次 flush()。
 static void test_multi_segment_search() {
     TEST("多 Segment 搜索：两个 Segment 结果正确汇总");
     auto dir = tmpDir("multi");
     {
-        IndexWriter w0(dir, 8);
+        IndexWriter w(dir, 8);
+        // Segment 0: 15 docs, 7 python (even ids)
         for (int i = 1; i <= 15; ++i) {
             Document doc; doc.doc_id = static_cast<DocId>(i);
             doc.set("body", i % 2 == 0 ? "python" : "java");
-            w0.addDocument(doc);
+            w.addDocument(doc);
         }
-        w0.flush();
-    }
-    {
-        IndexWriter w1(dir, 8);
+        w.flush();  // → segment_0/
+        // Segment 1: 10 docs, all python
         for (int i = 1; i <= 10; ++i) {
             Document doc; doc.doc_id = static_cast<DocId>(i);
             doc.set("body", "python");
-            w1.addDocument(doc);
+            w.addDocument(doc);
         }
-        w1.flush();
+        w.flush();  // → segment_1/
     }
 
     IndexSearcher s(dir);

@@ -67,17 +67,21 @@ static std::map<std::string, uint32_t> getTermDf(
     return m;
 }
 
-// 统计目录下所有 _N.si 文件对应的 seg_id
+// 统计目录下存在 si 文件的 segment_N/ 子目录对应的 seg_id。
+// 已修复 bug（勿回退）：原实现扫描 _N.si 根目录文件，但实际格式为
+// segment_N/si（无扩展名）。
 static std::set<uint32_t> listSiIds(const std::string& dir) {
     std::set<uint32_t> ids;
     for (const auto& entry : fs::directory_iterator(dir)) {
+        if (!entry.is_directory()) continue;
         const auto name = entry.path().filename().string();
-        if (name.size() > 4 && name.front() == '_' && name.substr(name.size()-3) == ".si") {
-            try {
-                uint32_t id = static_cast<uint32_t>(
-                    std::stoul(name.substr(1, name.size()-4)));
-                ids.insert(id);
-            } catch (...) {}
+        if (name.size() > 8 && name.substr(0, 8) == "segment_") {
+            if (fs::exists(entry.path() / "si")) {
+                try {
+                    uint32_t id = static_cast<uint32_t>(std::stoul(name.substr(8)));
+                    ids.insert(id);
+                } catch (...) {}
+            }
         }
     }
     return ids;
@@ -89,21 +93,21 @@ static std::set<uint32_t> listSiIds(const std::string& dir) {
 // 策略：用三个临时子目录分别写出，再把文件复制/重命名到合并目录
 // ─────────────────────────────────────────────────────────────────────────────
 
-// 把 src_dir/_0.* 重命名（硬链接）到 dst_dir/_<new_id>.*
+// 已修复 bug（勿回退）：IndexWriter 将文件写入 segment_0/ 子目录（非 _0.* 根目录文件）。
+// 原实现在 src_dir 根目录寻找 _0.* 文件，匹配失败 → dst_dir 空目录 →
+// SegmentMerger 抛 "Cannot open .tim: .../merged/segment_0/tim"。
+// 修复：复制 src_dir/segment_0/ 整个目录到 dst_dir/segment_<new_id>/。
 static void copySegmentAs(const std::string& src_dir,
                            const std::string& dst_dir,
                            uint32_t           new_id)
 {
-    fs::create_directories(dst_dir);
-    for (const auto& entry : fs::directory_iterator(src_dir)) {
-        const auto fname = entry.path().filename().string();
-        // 匹配 _0.xxx 的文件
-        if (fname.size() > 2 && fname.front() == '_' && fname[1] == '0') {
-            std::string new_fname = "_" + std::to_string(new_id) + fname.substr(2);
-            fs::copy_file(entry.path(),
-                          fs::path(dst_dir) / new_fname,
-                          fs::copy_options::overwrite_existing);
-        }
+    std::string src_seg = src_dir + "/segment_0";
+    std::string dst_seg = dst_dir + "/segment_" + std::to_string(new_id);
+    fs::create_directories(dst_seg);
+    for (const auto& entry : fs::directory_iterator(src_seg)) {
+        fs::copy_file(entry.path(),
+                      fs::path(dst_seg) / entry.path().filename(),
+                      fs::copy_options::overwrite_existing);
     }
 }
 
