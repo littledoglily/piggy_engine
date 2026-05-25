@@ -15,6 +15,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ii {
@@ -33,12 +34,19 @@ class IndexSearcher {
 public:
     explicit IndexSearcher(const std::string& dir);
 
-    // ── 实时 segment 接入（Step 6/7）────────────────────────────────────────
+    // ── 多 reader 管理接口 ────────────────────────────────────────────────────
     //
-    // attachRealtime：将内存 segment 纳入查询。调用方负责保证 shared_ptr 的生命周期
-    // 覆盖 MemorySegment 的 arena，在所有持有该快照的 search() 返回后方可 reset()。
-    // detachRealtime：移除实时 segment（用于 flush 后切换到磁盘 segment）。
-    void attachRealtime(std::shared_ptr<const ISegmentReader> rt);
+    // addReader：将 reader（active RT / frozen memory / 新磁盘）加入 all_readers_。
+    // commitDiskSegment：原子操作——先加入 new_disk，再移除 frozen_to_remove，
+    //   保证 doc 在整个 flush 周期内始终可见。
+    // removeReader：从 all_readers_ 移除（RT 线程 shutdown 时调用）。
+    void addReader(std::shared_ptr<ISegmentReader> reader);
+    void commitDiskSegment(std::shared_ptr<ISegmentReader>              new_disk,
+                           std::vector<std::shared_ptr<ISegmentReader>> frozen_to_remove);
+    void removeReader(std::shared_ptr<ISegmentReader> reader);
+
+    // ── 兼容接口（已有测试使用，内部转发到 addReader/removeReader）────────────
+    void attachRealtime(std::shared_ptr<ISegmentReader> rt);
     void detachRealtime();
 
     std::vector<SearchResult> search(
@@ -61,9 +69,12 @@ public:
 private:
     std::vector<FieldTerm> parseQuery(const std::string& raw_query) const;
 
+    // readers_snap：search() 开始时在 shared_lock 下复制的 all_readers_ 快照。
+    // N = 快照中所有 reader 的 docCount() 之和。
     std::unordered_map<std::string, float> computeIdfsFromBQ(
-        const BooleanQuery& bq,
-        const ISegmentReader* rt  // nullptr if no realtime segment
+        const BooleanQuery&                                    bq,
+        const std::vector<std::shared_ptr<ISegmentReader>>&    readers_snap,
+        uint32_t                                               total_docs
     ) const;
 
     // deprecated path のみ使用（searchAND / searchOR_WAND）
@@ -71,14 +82,15 @@ private:
         const std::vector<FieldTerm>& fterms
     ) const;
 
-    // 在单个 Segment（disk 或 memory）上驱动 Scorer 树，返回 top_k 结果。
-    // 接受 ISegmentReader 使内存 segment 可复用相同路径。
+    // 在单个 Segment 上驱动 Scorer 树，返回 top_k 结果。
+    // total_docs：跨所有 reader 的文档总数，用于 ScorerContext。
     std::vector<SearchResult> searchImpl(
-        const BooleanQuery& bq,
-        int top_k,
-        const ISegmentReader& seg,
-        const std::unordered_map<std::string, float>& term_idfs,
-        const NumericFilter* filter
+        const BooleanQuery&                            bq,
+        int                                            top_k,
+        const ISegmentReader&                          seg,
+        const std::unordered_map<std::string, float>&  term_idfs,
+        const NumericFilter*                           filter,
+        uint32_t                                       total_docs
     ) const;
 
     [[deprecated("use searchImpl via BooleanQuery")]]
@@ -108,6 +120,7 @@ private:
                       DocId doc_id,
                       const NumericFilter& filter) const;
 
+    // mergeTopK：跨 segment 归并后按 ext_id 去重（保留最高分），再截断到 top_k。
     std::vector<SearchResult> mergeTopK(
         std::vector<std::vector<SearchResult>>& per_seg_results,
         int top_k
@@ -125,17 +138,20 @@ private:
     using MinHeap = std::priority_queue<HeapEntry>;
 
     Analyzer    analyzer_;
-    std::vector<std::unique_ptr<SegmentReader>> segments_;
-    uint32_t    global_total_docs_ = 0;
+    // 磁盘 segment（供 deprecated searchAND/searchOR_WAND 路径直接访问 SegmentReader&）
+    std::vector<std::shared_ptr<SegmentReader>> segments_;
+    uint32_t    global_total_docs_ = 0;  // 磁盘 segment 总文档数（deprecated 路径用）
     mutable bool debug_ = false;
 
     std::vector<std::string> default_search_fields_;
 
-    // ── 实时 segment（Step 6/7）──────────────────────────────────────────────
-    // 通过 shared_ptr 管理生命周期：search() 在搜索开始时获取快照，
-    // 保证 arena 在本次搜索期间不被 reset（即使外部调用了 attachRealtime 换了一个新的）。
-    mutable std::shared_mutex             rt_mutex_;
-    std::shared_ptr<const ISegmentReader> rt_reader_;
+    // ── 统一 reader 列表（disk + frozen memory + active memory）─────────────
+    // search() 在 shared_lock 下复制快照，锁外完成所有搜索，保证并发安全。
+    mutable std::shared_mutex                       readers_mutex_;
+    std::vector<std::shared_ptr<ISegmentReader>>    all_readers_;
+
+    // attachRealtime/detachRealtime 兼容：追踪通过兼容接口注册的单个 RT reader
+    std::shared_ptr<ISegmentReader>                 compat_rt_reader_;
 };
 
 } // namespace ii

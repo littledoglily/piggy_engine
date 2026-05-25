@@ -475,8 +475,23 @@ void MemorySegment::flushToDisk(const std::string& dir, uint32_t seg_id) const {
 
         for (uint32_t i = 0; i < doc_count_; ++i) {
             ii::DocId did = i + 1;
+
+            // Always write fdt entry: [doc_id:4B] [ext_id:8B] [n_fields:4B] [fields...]
+            // This ensures ext_id is readable via readStoredDoc even when no fields are stored.
+            fdx_entries.push_back({did, static_cast<uint64_t>(ffdt.tellp())});
+            wU32(ffdt, did);
+            uint64_t ext_id = 0;
+            {
+                auto eit = doc_ext_ids_.find(did);
+                if (eit != doc_ext_ids_.end()) ext_id = eit->second;
+            }
+            wU64(ffdt, ext_id);
+
             auto it = stored_heads_.find(did);
-            if (it == stored_heads_.end()) continue;
+            if (it == stored_heads_.end()) {
+                wU32(ffdt, 0);  // n_fields = 0
+                continue;
+            }
 
             // Reconstruct stored buffer from StoredPage chain
             std::string payload;
@@ -487,21 +502,14 @@ void MemorySegment::flushToDisk(const std::string& dir, uint32_t seg_id) const {
                 payload.append(data, hdr->data_len);
                 cur = hdr->next;
             }
-            if (payload.size() < 4) continue;
+            if (payload.size() < 4) {
+                wU32(ffdt, 0);  // n_fields = 0
+                continue;
+            }
 
             // In-memory format: [n_fields:4B] [name_len:4B name val_len:4B val] ...
             uint32_t n_fields = 0;
             std::memcpy(&n_fields, payload.data(), 4);
-
-            // On-disk .fdt format: [doc_id:4B] [ext_id:8B] [n_fields:4B] [name_len name val_len val]
-            fdx_entries.push_back({did, static_cast<uint64_t>(ffdt.tellp())});
-            wU32(ffdt, did);
-            uint64_t ext_id = 0;
-            {
-                auto eit = doc_ext_ids_.find(did);
-                if (eit != doc_ext_ids_.end()) ext_id = eit->second;
-            }
-            wU64(ffdt, ext_id);
             wU32(ffdt, n_fields);
             ffdt.write(payload.data() + 4, payload.size() - 4);
         }
