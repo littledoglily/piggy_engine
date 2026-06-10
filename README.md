@@ -1,7 +1,7 @@
 # piggy_engine
 
 Lucene 风格的 C++17 全文搜索引擎，支持实时写入、per-field 倒排索引、BM25 打分、PForDelta 压缩、BlockMaxWAND 剪枝、FastField 列存、并行索引构建。
-未来支持向量索引，及同步最新的版本特性
+未来支持向量索引，及同步最新的版本特性 
 
 ## 架构
 
