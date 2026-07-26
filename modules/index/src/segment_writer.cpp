@@ -62,6 +62,8 @@ std::unordered_map<DocId, uint32_t> SegmentWriter::computeFieldDocLens(const InM
     return lens;
 }
 
+// 预计算每个 term 的 BM25 tf-norm 上界（block-max + global-max，不含 IDF），
+// 写入 SkipNode.max_score 供 BlockMaxWAND 在打分时跳过整块无需解压
 SegmentWriter::TfNormMap SegmentWriter::calcTfNorms(
     const InMemoryIndex&                         idx,
     const std::unordered_map<DocId, uint32_t>&   doc_lens,

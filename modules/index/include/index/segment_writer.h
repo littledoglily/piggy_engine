@@ -86,7 +86,10 @@ public:
         const Schema&                               schema
     );
 
-    // term → {全局max_tf_norm, 各block max_tf_norm}
+    // term → {global_max_tf_norm, block_max_tf_norms}
+    // first：该 term 在整个 posting list 上的 tf-norm 最大值（不含 IDF）
+    // second：按 128 篇一个 block 切分（与 SkipList block 对齐），每个 block 内的 tf-norm 最大值，
+    //         下标 i 对应第 i 个 block（entries[i*128 .. i*128+128)）
     using TfNormMap = std::unordered_map<std::string,
                           std::pair<float, std::vector<float>>>;
 
